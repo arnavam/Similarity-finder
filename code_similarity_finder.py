@@ -4,7 +4,6 @@ import fnmatch
 import os
 import chardet
 import Levenshtein
-import numpy as np
 import spacy
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
@@ -72,7 +71,9 @@ class FlexibleCodeSimilarityChecker:
             try:
                 tree = ast.parse(processed)
                 for node in ast.walk(tree):
-                    if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant):
+                    if isinstance(node, ast.Expr) and isinstance(
+                        node.value, ast.Constant
+                    ):
                         # This is a docstring, remove it
                         node.value.s = ""
                 processed = ast.unparse(tree)
@@ -146,7 +147,7 @@ class FlexibleCodeSimilarityChecker:
             tokens.append(token.text)
         return tokens
 
-    def calculate_similarities(self, new_code ):
+    def calculate_similarities(self, new_code):
         """Calculate multiple similarity scores with detailed results"""
         if not self.previous_submissions:
             return {"error": "No previous submissions available"}
@@ -158,20 +159,20 @@ class FlexibleCodeSimilarityChecker:
 
         results = {}
         all_scores = {}
-        
+
         # 1. Raw text similarity (Levenshtein)
         raw_scores = [
             Levenshtein.ratio(new_code, prev) for prev in self.previous_submissions
         ]
         all_scores["raw_scores"] = raw_scores
-        
+
         # 2. Processed text similarity
         processed_scores = [
             Levenshtein.ratio(processed_new_code, self.preprocess_code(prev))
             for prev in self.previous_submissions
         ]
         all_scores["processed_scores"] = processed_scores
-        
+
         # 3. TF-IDF similarity
         all_texts = [
             self.preprocess_code(prev) for prev in self.previous_submissions
@@ -192,7 +193,7 @@ class FlexibleCodeSimilarityChecker:
                 ast_scores.append(score)
             else:
                 ast_scores.append(0.0)
-                
+
         if any(score > 0 for score in ast_scores):
             all_scores["ast_scores"] = ast_scores
 
@@ -211,7 +212,7 @@ class FlexibleCodeSimilarityChecker:
 
         return all_scores
 
-    def _save_scores_to_csv(self, all_scores ):
+    def _save_scores_to_csv(self, all_scores):
         """Save detailed similarity scores to CSV file"""
         # Add submission names as the first column
         keys = ["submission_name"] + list(all_scores.keys())
@@ -228,7 +229,7 @@ class FlexibleCodeSimilarityChecker:
             writer.writerow(keys)
             writer.writerows(rows)
 
-        print(f"Similarity scores saved to similarity_scores.csv ")
+        print("Similarity scores saved to similarity_scores.csv ")
 
     def sequence_similarity(self, seq1, seq2):
         """Calculate similarity between two sequences"""
@@ -252,21 +253,22 @@ class FlexibleCodeSimilarityChecker:
 
 def detect_encoding_pth(file_path):
     """Detect file encoding"""
-    with open(file_path, 'rb') as f:
+    with open(file_path, "rb") as f:
         raw_data = f.read()
-        return chardet.detect(raw_data)['encoding']
+        return chardet.detect(raw_data)["encoding"]
+
 
 def read_file_safe(file_path):
     """Read file with encoding detection and fallback"""
     try:
         # Try to detect encoding
         encoding = detect_encoding_pth(file_path)
-        with open(file_path, 'r', encoding=encoding) as f:
+        with open(file_path, "r", encoding=encoding) as f:
             return f.read()
     except (UnicodeDecodeError, LookupError):
         # Fallback to latin-1 which handles all byte sequences
         try:
-            with open(file_path, 'r', encoding='latin-1') as f:
+            with open(file_path, "r", encoding="latin-1") as f:
                 return f.read()
         except Exception as e:
             print(f"Error reading file {file_path} even with latin-1: {e}")
@@ -274,6 +276,7 @@ def read_file_safe(file_path):
     except Exception as e:
         print(f"Error reading file {file_path}: {e}")
         return ""
+
 
 def read_all_files_in_folder(folder_path, excluded_patterns=None):
     """Recursively read all files with encoding handling"""
@@ -286,12 +289,15 @@ def read_all_files_in_folder(folder_path, excluded_patterns=None):
         for root_dir, dir_names, file_names in os.walk(folder_path):
             # Filter out excluded directories
             dir_names[:] = [
-                d for d in dir_names 
+                d
+                for d in dir_names
                 if not any(fnmatch.fnmatch(d, pattern) for pattern in excluded_patterns)
             ]
 
             for filename in file_names:
-                if any(fnmatch.fnmatch(filename, pattern) for pattern in excluded_patterns):
+                if any(
+                    fnmatch.fnmatch(filename, pattern) for pattern in excluded_patterns
+                ):
                     continue
 
                 file_path = os.path.join(root_dir, filename)
@@ -299,11 +305,12 @@ def read_all_files_in_folder(folder_path, excluded_patterns=None):
                     content = read_file_safe(file_path)
                     if content:  # Only add if we successfully read content
                         contents.append((filename, content))
-                        
+
     except Exception as e:
         print(f"Error accessing folder {folder_path}: {e}")
 
     return contents
+
 
 def process_all_submissions(main_folder_path, excluded_patterns=None):
     if excluded_patterns is None:
@@ -317,16 +324,16 @@ def process_all_submissions(main_folder_path, excluded_patterns=None):
 
     for item in os.listdir(main_folder_path):
         item_path = os.path.join(main_folder_path, item)
-        
+
         if any(fnmatch.fnmatch(item, pattern) for pattern in excluded_patterns):
             continue
-            
+
         if os.path.isfile(item_path):
             print(f"Processing file: {item}")
             content = read_file_safe(item_path)
             if content:
                 submissions[item] = content
-        
+
         elif os.path.isdir(item_path):
             print(f"Processing folder: {item}")
             files_content = read_all_files_in_folder(item_path, excluded_patterns)
@@ -335,6 +342,8 @@ def process_all_submissions(main_folder_path, excluded_patterns=None):
                 submissions[item] = combined_content
 
     return submissions
+
+
 # Example usage
 if __name__ == "__main__":
     # Customize preprocessing options

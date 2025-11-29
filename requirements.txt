@@ -1,0 +1,5 @@
+spacy
+ast
+Levenshtein
+chardet
+streamlit
