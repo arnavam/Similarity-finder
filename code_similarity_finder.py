@@ -2,7 +2,7 @@ import ast
 import csv
 import fnmatch
 import os
-
+import chardet
 import Levenshtein
 import numpy as np
 import spacy
@@ -142,7 +142,6 @@ class FlexibleCodeSimilarityChecker:
         tokens = []
         doc = nlp(code)
 
-        # Iterate over the tokens and print each token text
         for token in doc:
             tokens.append(token.text)
         return tokens
@@ -164,8 +163,6 @@ class FlexibleCodeSimilarityChecker:
         raw_scores = [
             Levenshtein.ratio(new_code, prev) for prev in self.previous_submissions
         ]
-        results["raw_text_max"] = int(np.argmax(raw_scores))
-        results["raw_text_max_score"] = float(np.max(raw_scores))
         all_scores["raw_scores"] = raw_scores
         
         # 2. Processed text similarity
@@ -173,8 +170,6 @@ class FlexibleCodeSimilarityChecker:
             Levenshtein.ratio(processed_new_code, self.preprocess_code(prev))
             for prev in self.previous_submissions
         ]
-        results["processed_text_max"] = int(np.argmax(processed_scores))
-        results["processed_text_max_score"] = float(np.max(processed_scores))
         all_scores["processed_scores"] = processed_scores
         
         # 3. TF-IDF similarity
@@ -183,8 +178,7 @@ class FlexibleCodeSimilarityChecker:
         ] + [processed_new_code]
         tfidf_matrix = TfidfVectorizer().fit_transform(all_texts)
         cosine_scores = cosine_similarity(tfidf_matrix[-1], tfidf_matrix[:-1])
-        results["tfidf_max"] = int(np.argmax(cosine_scores))
-        results["tfidf_max_score"] = float(np.max(cosine_scores))
+
         all_scores["cosine_scores"] = [float(i) for i in cosine_scores[0]]
 
         # 4. AST structure similarity
@@ -200,8 +194,6 @@ class FlexibleCodeSimilarityChecker:
                 ast_scores.append(0.0)
                 
         if any(score > 0 for score in ast_scores):
-            results["ast_structure_max"] = int(np.argmax(ast_scores))
-            results["ast_structure_max_score"] = float(np.max(ast_scores))
             all_scores["ast_scores"] = ast_scores
 
         # 5. Token-based similarity
@@ -213,34 +205,29 @@ class FlexibleCodeSimilarityChecker:
             else:
                 token_scores.append(0.0)
 
-        results["token_similarity_max"] = int(np.argmax(token_scores))
-        results["token_similarity_max_score"] = float(np.max(token_scores))
         all_scores["token_scores"] = token_scores
-
         # Save detailed scores to CSV with submission names
         self._save_scores_to_csv(all_scores)
 
-        # Add submission names to results for easier interpretation
-        results["submission_names"] = self.submission_names
-        return results
+        return all_scores
 
     def _save_scores_to_csv(self, all_scores ):
         """Save detailed similarity scores to CSV file"""
         # Add submission names as the first column
         keys = ["submission_name"] + list(all_scores.keys())
         rows = []
-        
+
         for i, name in enumerate(self.submission_names):
             row = [name]
             for score_list in all_scores.values():
                 row.append(score_list[i] if i < len(score_list) else 0.0)
             rows.append(row)
-        
+
         with open("similarity_scores.csv", "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow(keys)
             writer.writerows(rows)
-        
+
         print(f"Similarity scores saved to similarity_scores.csv ")
 
     def sequence_similarity(self, seq1, seq2):
@@ -263,64 +250,62 @@ class FlexibleCodeSimilarityChecker:
         return lcs_length / max(m, n)
 
 
+def detect_encoding_pth(file_path):
+    """Detect file encoding"""
+    with open(file_path, 'rb') as f:
+        raw_data = f.read()
+        return chardet.detect(raw_data)['encoding']
+
+def read_file_safe(file_path):
+    """Read file with encoding detection and fallback"""
+    try:
+        # Try to detect encoding
+        encoding = detect_encoding_pth(file_path)
+        with open(file_path, 'r', encoding=encoding) as f:
+            return f.read()
+    except (UnicodeDecodeError, LookupError):
+        # Fallback to latin-1 which handles all byte sequences
+        try:
+            with open(file_path, 'r', encoding='latin-1') as f:
+                return f.read()
+        except Exception as e:
+            print(f"Error reading file {file_path} even with latin-1: {e}")
+            return ""
+    except Exception as e:
+        print(f"Error reading file {file_path}: {e}")
+        return ""
+
 def read_all_files_in_folder(folder_path, excluded_patterns=None):
-    """
-    Recursively read all files in a folder and its subfolders.
-
-    Args:
-        folder_path (str): Path to the folder to read
-        excluded_patterns (list): List of file patterns to exclude
-        (e.g., ['*.xlsx', '*.txt'])
-
-    Returns:
-        list: Contents of all non-excluded files
-    """
+    """Recursively read all files with encoding handling"""
     if excluded_patterns is None:
-        excluded_patterns = ["*.xlsx"]  # Default exclusion
+        excluded_patterns = ["*.xlsx"]
 
     contents = []
 
     try:
-        # Walk through all directories and subdirectories
         for root_dir, dir_names, file_names in os.walk(folder_path):
-            # Filter out excluded directories from further traversal
+            # Filter out excluded directories
             dir_names[:] = [
-                d
-                for d in dir_names
+                d for d in dir_names 
                 if not any(fnmatch.fnmatch(d, pattern) for pattern in excluded_patterns)
             ]
 
             for filename in file_names:
-                # Check if file matches any exclusion pattern
-                if any(
-                    fnmatch.fnmatch(filename, pattern) for pattern in excluded_patterns
-                ):
-                    continue  # Skip excluded files
+                if any(fnmatch.fnmatch(filename, pattern) for pattern in excluded_patterns):
+                    continue
 
                 file_path = os.path.join(root_dir, filename)
-
-                # Ensure it's a file (not a directory)
                 if os.path.isfile(file_path):
-                    try:
-                        with open(file_path, "r", encoding="utf-8") as file:
-                            file_content = file.read()
-                            contents.append((filename, file_content))
-                    except (IOError, UnicodeDecodeError) as e:
-                        print(f"Error reading file {file_path}: {e}")
-
+                    content = read_file_safe(file_path)
+                    if content:  # Only add if we successfully read content
+                        contents.append((filename, content))
+                        
     except Exception as e:
         print(f"Error accessing folder {folder_path}: {e}")
 
     return contents
 
-
 def process_all_submissions(main_folder_path, excluded_patterns=None):
-    """
-    Process both individual files and folders in the main folder as separate submissions
-    
-    Returns:
-        dict: {submission_identifier: combined_code}
-    """
     if excluded_patterns is None:
         excluded_patterns = ["*.xlsx"]
 
@@ -330,33 +315,26 @@ def process_all_submissions(main_folder_path, excluded_patterns=None):
         print(f"Folder {main_folder_path} does not exist")
         return submissions
 
-    # Process individual files in the main folder
     for item in os.listdir(main_folder_path):
         item_path = os.path.join(main_folder_path, item)
         
-        # Skip if it matches exclusion pattern
         if any(fnmatch.fnmatch(item, pattern) for pattern in excluded_patterns):
             continue
             
         if os.path.isfile(item_path):
             print(f"Processing file: {item}")
-            try:
-                with open(item_path, "r", encoding="utf-8") as f:
-                    submissions[item] = f.read()  # Use filename as identifier
-            except Exception as e:
-                print(f"Error reading file {item}: {e}")
+            content = read_file_safe(item_path)
+            if content:
+                submissions[item] = content
         
         elif os.path.isdir(item_path):
             print(f"Processing folder: {item}")
             files_content = read_all_files_in_folder(item_path, excluded_patterns)
             if files_content:
-                # Combine all files in the folder, using folder name as identifier
                 combined_content = "\n".join([content for _, content in files_content])
                 submissions[item] = combined_content
 
     return submissions
-
-
 # Example usage
 if __name__ == "__main__":
     # Customize preprocessing options
@@ -379,11 +357,11 @@ if __name__ == "__main__":
         checker.add_submission(name, code)
 
     print(f"Loaded {len(all_submissions)} submissions")
-    new_code = ""
-    # new_code = all_submissions.pop(input("enter the new file"))
+    new_code = input("enter the new file: ")
     if new_code == "":
         new_code = all_submissions.pop(next(iter(all_submissions)))
-        
+    else:
+        new_code = all_submissions.pop(new_code)
     scores = checker.calculate_similarities(new_code)
 
     print("\n=== Similarity Results ===")
