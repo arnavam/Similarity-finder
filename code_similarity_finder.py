@@ -367,7 +367,7 @@ if __name__ == "__main__":
 
     print(f"Loaded {len(all_submissions)} submissions")
     new_code = input("enter the new file: ")
-    if new_code == "":
+    if new_code == " ":
         new_code = all_submissions.pop(next(iter(all_submissions)))
     else:
         new_code = all_submissions.pop(new_code)

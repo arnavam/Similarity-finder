@@ -1,0 +1,10 @@
+services:
+  copyadi:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8501:8501"
+    volumes:
+      - .:/app
+    command: streamlit run a_streamlit_app.py --server.port=8501 --server.address=0.0.0.0

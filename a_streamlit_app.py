@@ -15,7 +15,6 @@ from code_similarity_finder import (
     process_all_submissions,
 )
 
-
 def detect_encoding(file_obj):
     """Detect encoding from UploadedFile bytes"""
     raw_data = file_obj.getvalue()
@@ -97,6 +96,7 @@ def main():
     st.set_page_config(
         page_title="Copyadi Checker", page_icon="🔍", layout="wide"
     )
+    
 
     st.title("🔍 Copyadi Checker")
     st.markdown("Compare new submissions against batch uploads of previous submissions")
@@ -290,13 +290,8 @@ def main():
             # Results table
             st.subheader("Similar Submissions Found")
             for i, key in enumerate(scores):
-                with st.expander(
-                    f"#{i + 1}: {key} (file: {
-                        checker.submission_names[np.argmax(scores[key])]
-                    })",
-                    expanded=i == 0,
-                ):
-                    display_comparison_highlights(checker, new_submission_code, key)
+                st.write(f"{i + 1}:  {key} (file: {checker.submission_names[np.argmax(scores[key])]}) = {np.max(scores[key]):.2%}")
+                  # display_comparison_highlights(checker, new_submission_code, key)
             #
             # # Warning levels
             # max_similarity = max([r["score"] for r in scores])
