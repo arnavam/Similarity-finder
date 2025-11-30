@@ -6,8 +6,6 @@ RUN apt-get update && apt-get install -y git
 
 RUN pip install -r requirements.txt
 
-RUN python -c "import spacy; spacy.cli.download('en_core_web_sm')"
-
 COPY . .
 
 EXPOSE 8501
