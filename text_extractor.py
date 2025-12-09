@@ -13,10 +13,6 @@ import git
 import textract
 
 
-# Default patterns to ignore
-DEFAULT_IGNORE_PATTERNS = ["*.git", "__pycache__", ".DS_Store", "node_modules"]
-
-
 def extract_text(file_path_or_bytes, filename: Optional[str] = None) -> str:
     """
     Extract text from any file using textract.
@@ -74,12 +70,11 @@ def extract_from_zip(
         Dict mapping submission name to combined content
     """
     if ignore_patterns is None:
-        ignore_patterns = DEFAULT_IGNORE_PATTERNS
+        ignore_patterns = []
     
     submission_files = {}  # submission_name -> list of (filename, content)
     
-    # Patterns to completely ignore (macOS junk)
-    skip_prefixes = ['__MACOSX/', '.DS_Store']
+
     
     try:
         with zipfile.ZipFile(zip_path_or_bytes, 'r') as zip_ref:
@@ -87,10 +82,8 @@ def extract_from_zip(
             top_level_items = set()
             print("\n=== ZIP FILE STRUCTURE ===")
             for file_info in zip_ref.filelist:
-                # Skip macOS junk completely
-                if any(file_info.filename.startswith(p) for p in skip_prefixes):
-                    continue
-                if '/.DS_Store' in file_info.filename:
+                # Skip junk files (handled by ignore patterns)
+                if _should_ignore(file_info.filename, ignore_patterns):
                     continue
                     
                 print(f"  {file_info.filename}")
@@ -111,13 +104,7 @@ def extract_from_zip(
                 if file_info.filename.endswith('/'):
                     continue
                 
-                # Skip macOS junk
-                if any(file_info.filename.startswith(p) for p in skip_prefixes):
-                    continue
-                if '/.DS_Store' in file_info.filename or file_info.filename.endswith('.DS_Store'):
-                    continue
-                
-                # Skip ignored patterns
+                # Skip junk files
                 if _should_ignore(file_info.filename, ignore_patterns):
                     continue
                 
@@ -190,7 +177,7 @@ def extract_zip_as_single(
         Combined content of all files as single string
     """
     if ignore_patterns is None:
-        ignore_patterns = DEFAULT_IGNORE_PATTERNS
+        ignore_patterns = []
     
     all_content = []
     
@@ -231,7 +218,7 @@ def extract_from_github(
         Dict with repo name as key and combined content as value (one submission per repo)
     """
     if ignore_patterns is None:
-        ignore_patterns = DEFAULT_IGNORE_PATTERNS
+        ignore_patterns = []
     
     submissions = {}
     
@@ -269,7 +256,7 @@ def extract_from_folder(
         Dict mapping relative filename to extracted text
     """
     if ignore_patterns is None:
-        ignore_patterns = DEFAULT_IGNORE_PATTERNS
+        ignore_patterns = []
     
     submissions = {}
     

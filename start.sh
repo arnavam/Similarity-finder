@@ -1,8 +1,12 @@
 #!/bin/bash
 
+# Use PORT env variable (Render sets this) or default to 8501
+STREAMLIT_PORT=${PORT:-8501}
+API_PORT=8000
+
 # Start API server in background
-echo "Starting API server on port 8000..."
-uvicorn api_server:app --host 0.0.0.0 --port 8000 &
+echo "Starting API server on port $API_PORT..."
+uvicorn api_server:app --host 0.0.0.0 --port $API_PORT &
 API_PID=$!
 
 # Wait for API to be ready
@@ -18,5 +22,5 @@ fi
 echo "API server running with PID $API_PID"
 
 # Start Streamlit in foreground (keeps container alive)
-echo "Starting Streamlit on port 8501..."
-exec streamlit run a_streamlit_app.py --server.port=8501 --server.address=0.0.0.0
+echo "Starting Streamlit on port $STREAMLIT_PORT..."
+exec streamlit run a_streamlit_app.py --server.port=$STREAMLIT_PORT --server.address=0.0.0.0

@@ -123,12 +123,18 @@ def main():
     preserve_variable_names = st.sidebar.checkbox("Preserve Variable Names", value=True)
     preserve_literals = st.sidebar.checkbox("Preserve Literals", value=False)
 
-    ignore_patterns = st.sidebar.multiselect(
+    # OS junk patterns - always filtered (combined with user selection)
+    OS_JUNK_PATTERNS = [".DS_Store", "._*", "__MACOSX", "Thumbs.db", "desktop.ini", "$RECYCLE.BIN", ".Trash-*"]
+    
+    user_ignore_patterns = st.sidebar.multiselect(
         "Ignore Patterns",
-        ["*.xlsx", "*.pdf", "*.git", "__pycache__", ".DS_Store", "node_modules"],
-        default=["*.xlsx", "*.pdf", "*.git", "__pycache__", ".DS_Store"],
+        ["*.xlsx", "*.pdf", "*.git", "__pycache__", "node_modules", "*.pyc", "*.log"],
+        default=["*.xlsx", "*.pdf", "*.git", "__pycache__"],
         accept_new_options=True,
     )
+    
+    # Combine OS junk + user patterns
+    ignore_patterns = OS_JUNK_PATTERNS + user_ignore_patterns
 
     preprocessing_options = {
         "remove_comments": remove_comments,
