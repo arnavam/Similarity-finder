@@ -19,7 +19,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY . .
 
+# Make startup script executable
+RUN chmod +x start.sh
+
 # Expose both ports
 EXPOSE 8000 8501
 
-CMD ["sh", "-c", "uvicorn api_server:app --host 0.0.0.0 --port 8000 & streamlit run a_streamlit_app.py --server.port=8501 --server.address=0.0.0.0"]
+# Use startup script to run both services
+CMD ["./start.sh"]
