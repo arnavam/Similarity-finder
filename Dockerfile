@@ -22,8 +22,8 @@ COPY . .
 # Make startup script executable
 RUN chmod +x start.sh
 
-# Expose both ports
-EXPOSE 8000 8501
+# Expose API port
+EXPOSE 8000
 
-# Use startup script to run both services
+# Run API server
 CMD ["./start.sh"]

@@ -3,12 +3,13 @@ Streamlit Frontend for Code Similarity Checker
 Communicates with api_server.py via HTTP requests.
 """
 
+import os
 import numpy as np
 import requests
 import streamlit as st
 
-# API endpoint - change this if running API on different host/port
-API_BASE_URL = "http://localhost:8000"
+# API endpoint - uses environment variable or defaults to localhost
+API_BASE_URL = os.environ.get("API_URL", "http://localhost:8000")
 
 
 def upload_files_to_api(files, ignore_patterns=None):
