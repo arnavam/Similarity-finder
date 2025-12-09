@@ -1,8 +1,4 @@
 import ast
-import csv
-import fnmatch
-import os
-import chardet
 import Levenshtein
 import spacy
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -207,29 +203,8 @@ class FlexibleCodeSimilarityChecker:
                 token_scores.append(0.0)
 
         all_scores["token_scores"] = token_scores
-        # Save detailed scores to CSV with submission names
-        self._save_scores_to_csv(all_scores)
 
         return all_scores
-
-    def _save_scores_to_csv(self, all_scores):
-        """Save detailed similarity scores to CSV file"""
-        # Add submission names as the first column
-        keys = ["submission_name"] + list(all_scores.keys())
-        rows = []
-
-        for i, name in enumerate(self.submission_names):
-            row = [name]
-            for score_list in all_scores.values():
-                row.append(score_list[i] if i < len(score_list) else 0.0)
-            rows.append(row)
-
-        with open("similarity_scores.csv", "w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow(keys)
-            writer.writerows(rows)
-
-        print("Similarity scores saved to similarity_scores.csv ")
 
     def sequence_similarity(self, seq1, seq2):
         """Calculate similarity between two sequences"""
@@ -249,137 +224,3 @@ class FlexibleCodeSimilarityChecker:
 
         lcs_length = dp[m][n]
         return lcs_length / max(m, n)
-
-
-def detect_encoding_pth(file_path):
-    """Detect file encoding"""
-    with open(file_path, "rb") as f:
-        raw_data = f.read()
-        return chardet.detect(raw_data)["encoding"]
-
-
-def read_file_safe(file_path):
-    """Read file with encoding detection and fallback"""
-    try:
-        # Try to detect encoding
-        encoding = detect_encoding_pth(file_path)
-        with open(file_path, "r", encoding=encoding) as f:
-            return f.read()
-    except (UnicodeDecodeError, LookupError):
-        # Fallback to latin-1 which handles all byte sequences
-        try:
-            with open(file_path, "r", encoding="latin-1") as f:
-                return f.read()
-        except Exception as e:
-            print(f"Error reading file {file_path} even with latin-1: {e}")
-            return ""
-    except Exception as e:
-        print(f"Error reading file {file_path}: {e}")
-        return ""
-
-
-def read_all_files_in_folder(folder_path, excluded_patterns=None):
-    """Recursively read all files with encoding handling"""
-    if excluded_patterns is None:
-        excluded_patterns = ["*.xlsx"]
-
-    contents = []
-
-    try:
-        for root_dir, dir_names, file_names in os.walk(folder_path):
-            # Filter out excluded directories
-            dir_names[:] = [
-                d
-                for d in dir_names
-                if not any(fnmatch.fnmatch(d, pattern) for pattern in excluded_patterns)
-            ]
-
-            for filename in file_names:
-                if any(
-                    fnmatch.fnmatch(filename, pattern) for pattern in excluded_patterns
-                ):
-                    continue
-
-                file_path = os.path.join(root_dir, filename)
-                if os.path.isfile(file_path):
-                    content = read_file_safe(file_path)
-                    if content:  # Only add if we successfully read content
-                        contents.append((filename, content))
-
-    except Exception as e:
-        print(f"Error accessing folder {folder_path}: {e}")
-
-    return contents
-
-
-def process_all_submissions(main_folder_path, excluded_patterns=None):
-    if excluded_patterns is None:
-        excluded_patterns = ["*.xlsx"]
-
-    submissions = {}
-
-    if not os.path.exists(main_folder_path):
-        print(f"Folder {main_folder_path} does not exist")
-        return submissions
-
-    for item in os.listdir(main_folder_path):
-        item_path = os.path.join(main_folder_path, item)
-
-        if any(fnmatch.fnmatch(item, pattern) for pattern in excluded_patterns):
-            continue
-
-        if os.path.isfile(item_path):
-            print(f"Processing file: {item}")
-            content = read_file_safe(item_path)
-            if content:
-                submissions[item] = content
-
-        elif os.path.isdir(item_path):
-            print(f"Processing folder: {item}")
-            files_content = read_all_files_in_folder(item_path, excluded_patterns)
-            if files_content:
-                combined_content = "\n".join([content for _, content in files_content])
-                submissions[item] = combined_content
-
-    return submissions
-
-
-# Example usage
-if __name__ == "__main__":
-    # Customize preprocessing options
-    options = {
-        "remove_comments": True,
-        "normalize_whitespace": True,
-        "preserve_variable_names": True,  # Keep variable names in AST
-        "preserve_literals": False,  # Don't preserve literal values
-    }
-    checker = FlexibleCodeSimilarityChecker(preprocessing_options=options)
-
-    folder_path = "prev_submissions/"
-    # Get all submissions (both files and folders)
-    all_submissions = process_all_submissions(
-        folder_path, ["*.xlsx", "*.pdf", "*.git", "__pycache__"]
-    )
-
-    # Add submissions with their names/identifiers
-    for name, code in all_submissions.items():
-        checker.add_submission(name, code)
-
-    print(f"Loaded {len(all_submissions)} submissions")
-    new_code = input("enter the new file: ")
-    if new_code == " ":
-        new_code = all_submissions.pop(next(iter(all_submissions)))
-    else:
-        new_code = all_submissions.pop(new_code)
-    scores = checker.calculate_similarities(new_code)
-
-    print("\n=== Similarity Results ===")
-    for metric, value in scores.items():
-        if metric == "submission_names":
-            continue
-        if "max" in metric and "score" not in metric:
-            idx = value
-            score_metric = metric + "_score"
-            score_value = scores.get(score_metric, 0)
-            submission_name = checker.submission_names[idx]
-            print(f"{metric}: {submission_name} (score: {score_value:.4f})")

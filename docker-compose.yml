@@ -5,6 +5,8 @@ services:
       dockerfile: Dockerfile
     ports:
       - "8501:8501"
+      - "8000:8000"
     volumes:
       - .:/app
-    command: streamlit run a_streamlit_app.py --server.port=8501 --server.address=0.0.0.0
+    environment:
+      - PYTHONUNBUFFERED=1
