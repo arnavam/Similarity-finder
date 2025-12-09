@@ -1,14 +1,26 @@
 import ast
+from functools import lru_cache
+from difflib import SequenceMatcher
 import Levenshtein
-import spacy
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
-# Load the English tokenizer model
-nlp = spacy.load("en_core_web_sm")
+# Lazy load spaCy to avoid cold start penalty
+_nlp = None
+
+def get_nlp():
+    """Lazy load spaCy model - only loads when first needed."""
+    global _nlp
+    if _nlp is None:
+        import spacy
+        _nlp = spacy.load("en_core_web_sm")
+    return _nlp
 
 
 class FlexibleCodeSimilarityChecker:
+    # Class-level cache for preprocessed code (shared across instances)
+    _preprocess_cache = {}
+    
     def __init__(self, preprocessing_options=None):
         """
         Initialize with customizable preprocessing options
@@ -24,6 +36,7 @@ class FlexibleCodeSimilarityChecker:
         self.previous_submissions = []  # Store original code
         self.previous_asts = []
         self.previous_tokens = []
+        self.previous_processed = []  # Cache preprocessed versions
 
         # Default preprocessing options
         self.options = {
@@ -36,19 +49,31 @@ class FlexibleCodeSimilarityChecker:
         # Update with user-provided options
         if preprocessing_options:
             self.options.update(preprocessing_options)
+        
+        # Create options key for caching
+        self._options_key = tuple(sorted(self.options.items()))
 
     def add_submission(self, name, code):
         """Add a new submission to the history with an identifier"""
         self.submission_names.append(name)
         self.previous_submissions.append(code)
 
-        # Process based on options
-        processed_code = self.preprocess_code(code)
+        # Process based on options (with caching)
+        processed_code = self._get_preprocessed(code)
+        self.previous_processed.append(processed_code)
+        
         ast_representation = self.extract_ast_features(code)
         tokens = self.tokenize_code(processed_code)
 
         self.previous_asts.append(ast_representation)
         self.previous_tokens.append(tokens)
+
+    def _get_preprocessed(self, code):
+        """Get preprocessed code with caching."""
+        cache_key = (hash(code), self._options_key)
+        if cache_key not in self._preprocess_cache:
+            self._preprocess_cache[cache_key] = self.preprocess_code(code)
+        return self._preprocess_cache[cache_key]
 
     def preprocess_code(self, code):
         """Preprocess code based on options"""
@@ -135,8 +160,9 @@ class FlexibleCodeSimilarityChecker:
             }
 
     def tokenize_code(self, code):
-        """Simple tokenization of code"""
+        """Simple tokenization of code using lazy-loaded spaCy"""
         tokens = []
+        nlp = get_nlp()
         doc = nlp(code)
 
         for token in doc:
@@ -148,12 +174,11 @@ class FlexibleCodeSimilarityChecker:
         if not self.previous_submissions:
             return {"error": "No previous submissions available"}
 
-        # Process the new code
-        processed_new_code = self.preprocess_code(new_code)
+        # Process the new code (with caching)
+        processed_new_code = self._get_preprocessed(new_code)
         new_ast = self.extract_ast_features(new_code)
         new_tokens = self.tokenize_code(processed_new_code)
 
-        results = {}
         all_scores = {}
 
         # 1. Raw text similarity (Levenshtein)
@@ -162,17 +187,15 @@ class FlexibleCodeSimilarityChecker:
         ]
         all_scores["raw_scores"] = raw_scores
 
-        # 2. Processed text similarity
+        # 2. Processed text similarity (use cached versions)
         processed_scores = [
-            Levenshtein.ratio(processed_new_code, self.preprocess_code(prev))
-            for prev in self.previous_submissions
+            Levenshtein.ratio(processed_new_code, prev_processed)
+            for prev_processed in self.previous_processed
         ]
         all_scores["processed_scores"] = processed_scores
 
-        # 3. TF-IDF similarity
-        all_texts = [
-            self.preprocess_code(prev) for prev in self.previous_submissions
-        ] + [processed_new_code]
+        # 3. TF-IDF similarity (use cached preprocessed versions)
+        all_texts = self.previous_processed + [processed_new_code]
         tfidf_matrix = TfidfVectorizer().fit_transform(all_texts)
         cosine_scores = cosine_similarity(tfidf_matrix[-1], tfidf_matrix[:-1])
 
@@ -207,20 +230,11 @@ class FlexibleCodeSimilarityChecker:
         return all_scores
 
     def sequence_similarity(self, seq1, seq2):
-        """Calculate similarity between two sequences"""
+        """Calculate similarity between two sequences using optimized difflib."""
         if not seq1 or not seq2:
             return 0
+        
+        # Use difflib.SequenceMatcher which is faster than custom LCS
+        # and uses an optimized algorithm
+        return SequenceMatcher(None, seq1, seq2).ratio()
 
-        # Find the longest common subsequence
-        m, n = len(seq1), len(seq2)
-        dp = [[0] * (n + 1) for _ in range(m + 1)]
-
-        for i in range(1, m + 1):
-            for j in range(1, n + 1):
-                if seq1[i - 1] == seq2[j - 1]:
-                    dp[i][j] = dp[i - 1][j - 1] + 1
-                else:
-                    dp[i][j] = max(dp[i - 1][j], dp[i][j - 1])
-
-        lcs_length = dp[m][n]
-        return lcs_length / max(m, n)
