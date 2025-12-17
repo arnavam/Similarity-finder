@@ -3,7 +3,7 @@
 # Render-only deployment: Just run the API server
 # Streamlit frontend is deployed separately on Streamlit Community Cloud
 
-PORT=${PORT:-8000}
+PORT=${PORT:-7860}
 
 echo "Starting API server on port $PORT..."
 cd /app/backend

@@ -13,12 +13,13 @@ import numpy as np
 import requests
 import streamlit as st
 
+
 # API endpoint - tries localhost first, falls back to remote
 try:
     requests.get("http://localhost:8000/", timeout=1)
     API_BASE_URL = "http://localhost:8000"
 except:
-    API_BASE_URL = os.environ.get("API_URL", "https://copyadi-finder.onrender.com")
+    API_BASE_URL = "https://huggingface.co/spaces/arnavam/copyadi-finder"
 
 
 # ===== Auth Helper Functions =====
@@ -417,7 +418,7 @@ def main():
             st.sidebar.error(f"❌ API Error: {response.status_code}")
     except:
         st.sidebar.error("❌ API Not Running")
-        st.sidebar.info("Start API: `https://copyadi-finder.onrender.com` or local")
+        st.sidebar.info(f"Start API: `{API_BASE_URL}`")
 
     
     if api_connected:

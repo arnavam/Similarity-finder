@@ -18,7 +18,7 @@ try:
     requests.get("http://localhost:8000/", timeout=1)
     API_BASE_URL = "http://localhost:8000"
 except:
-    API_BASE_URL = os.environ.get("API_URL", "https://copyadi-finder.onrender.com")
+    API_BASE_URL = os.environ.get("API_URL")
 
 
 # ===== Auth Helper Functions =====

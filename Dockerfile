@@ -35,7 +35,7 @@ COPY start.sh .
 RUN chmod +x start.sh
 
 # Expose API port
-EXPOSE 8000
+EXPOSE 7860
 
 # Run API server
 CMD ["./start.sh"]
