@@ -1,0 +1,15 @@
+# LlamaIndex dependencies for text extraction
+# Use this instead of textract for lighter Docker builds
+
+llama-index-core>=0.11.0
+llama-index-readers-file>=0.2.0
+
+# Optional readers for specific formats (install as needed)
+# llama-index-readers-docling  # For advanced PDF/DOCX parsing
+# pypdf>=4.0.0  # PDF support (lighter alternative)
+# python-docx>=1.0.0  # DOCX support
+# python-pptx>=0.6.0  # PPTX support
+# openpyxl>=3.1.0  # XLSX support
+
+# Required for GitHub extraction
+gitpython>=3.1.0

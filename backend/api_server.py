@@ -1,0 +1,357 @@
+"""
+API Server for Code Similarity Checker
+REST API wrapper for text extraction and similarity analysis.
+
+Run with: uvicorn api_server:app --reload --port 8000
+"""
+
+import os
+import tempfile
+from typing import Dict, List, Optional
+
+from auth import (
+    require_auth,
+    save_github_urls,
+    get_user_github_history,
+    create_instance,
+    get_user_instances,
+    get_instance,
+    update_instance_urls,
+    delete_instance,
+)
+from auth import router as auth_router
+from code_similarity_finder import FlexibleCodeSimilarityChecker
+from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from text_extractor_llamaindex import (
+    extract_from_github,
+    extract_from_zip,
+    extract_text,
+    extract_zip_as_single,
+    extract_from_url,
+)
+
+app = FastAPI(
+    title="Code Similarity API",
+    description="Extract text from files and calculate code similarity",
+    version="2.0.0",
+)
+
+app.include_router(auth_router)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ===== Request/Response Models =====
+
+
+class GitHubRequest(BaseModel):
+    urls: List[str]
+    ignore_patterns: Optional[List[str]] = None
+
+
+class AnalyzeRequest(BaseModel):
+    submissions: Dict[str, str]  # filename -> content
+    target_file: str
+    preprocessing_options: Optional[Dict[str, bool]] = None
+    mode: str = "direct"  # "direct" or "preprocess"
+
+
+class PreprocessRequest(BaseModel):
+    submissions: Dict[str, str]
+    preprocessing_options: Optional[Dict[str, bool]] = None
+
+
+class CompareRequest(BaseModel):
+    embeddings: Dict[str, dict]  # Preprocessed embeddings
+    target_file: str
+    preprocessing_options: Optional[Dict[str, bool]] = None
+
+
+class ExtractResponse(BaseModel):
+    submissions: Dict[str, str]
+    count: int
+
+
+class AnalyzeResponse(BaseModel):
+    scores: Dict[str, List[float]]
+    submission_names: List[str]
+    target_file: str
+
+
+class PreprocessResponse(BaseModel):
+    embeddings: Dict[str, dict]
+    count: int
+    names: List[str]
+
+
+# ===== Endpoints =====
+
+
+@app.get("/")
+async def root():
+    """Health check endpoint"""
+    return {"status": "ok", "service": "Code Similarity API", "version": "2.0.0"}
+
+
+@app.post("/upload", response_model=ExtractResponse)
+async def upload_files(
+    files: List[UploadFile] = File(...),
+    ignore_patterns: Optional[str] = None,
+    user: dict = Depends(require_auth),
+):
+    """Upload files (ZIP, PDF, code files, etc.) and extract text."""
+    patterns = ignore_patterns.split(",") if ignore_patterns else None
+    all_submissions = {}
+
+    for file in files:
+        content = await file.read()
+
+        if file.filename.endswith(".zip"):
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as tmp:
+                tmp.write(content)
+                tmp_path = tmp.name
+            try:
+                submissions = extract_from_zip(tmp_path, patterns)
+                all_submissions.update(submissions)
+            finally:
+                os.unlink(tmp_path)
+        else:
+            text = extract_text(content, file.filename)
+            if text.strip():
+                all_submissions[file.filename] = text
+
+    return ExtractResponse(submissions=all_submissions, count=len(all_submissions))
+
+
+@app.post("/github", response_model=ExtractResponse)
+async def process_github(request: GitHubRequest, user: dict = Depends(require_auth)):
+    """Process URLs (GitHub repos or direct files) and extract text."""
+    all_submissions = {}
+
+    for url in request.urls:
+        try:
+            # Supports both GitHub repos and direct file URLs now
+            submissions = extract_from_url(url, request.ignore_patterns)
+            all_submissions.update(submissions)
+        except Exception as e:
+            raise HTTPException(
+                status_code=400, detail=f"Error processing {url}: {str(e)}"
+            )
+
+    # Save URLs to user's history
+    if request.urls:
+        save_github_urls(user["username"], request.urls)
+
+    return ExtractResponse(submissions=all_submissions, count=len(all_submissions))
+
+
+@app.get("/github-history")
+async def get_github_history(
+    instance_id: Optional[str] = None,
+    user: dict = Depends(require_auth)
+):
+    """Get user's GitHub URL history (optionally filtered by instance)."""
+    history = get_user_github_history(user["username"], instance_id)
+    return {"history": history, "count": len(history)}
+
+
+# ===== Instance Management Endpoints =====
+
+
+@app.get("/instances")
+async def list_instances(user: dict = Depends(require_auth)):
+    """List all instances for the current user."""
+    instances = get_user_instances(user["username"])
+    return {"instances": instances, "count": len(instances)}
+
+
+@app.post("/instances")
+async def create_new_instance(
+    name: str,
+    description: str = "",
+    user: dict = Depends(require_auth)
+):
+    """Create a new instance."""
+    instance = create_instance(user["username"], name, description)
+    return {"instance": instance, "message": "Instance created successfully"}
+
+
+@app.get("/instances/{instance_id}")
+async def get_instance_details(instance_id: str, user: dict = Depends(require_auth)):
+    """Get details of a specific instance."""
+    instance = get_instance(instance_id, user["username"])
+    if not instance:
+        raise HTTPException(status_code=404, detail="Instance not found")
+    return {"instance": instance}
+
+
+@app.put("/instances/{instance_id}/urls")
+async def update_urls(
+    instance_id: str,
+    urls: List[str],
+    user: dict = Depends(require_auth)
+):
+    """Update GitHub URLs for an instance."""
+    instance = get_instance(instance_id, user["username"])
+    if not instance:
+        raise HTTPException(status_code=404, detail="Instance not found")
+    
+    update_instance_urls(instance_id, user["username"], urls)
+    return {"message": "URLs updated successfully", "urls": urls}
+
+
+@app.delete("/instances/{instance_id}")
+async def delete_instance_endpoint(instance_id: str, user: dict = Depends(require_auth)):
+    """Delete an instance."""
+    instance = get_instance(instance_id, user["username"])
+    if not instance:
+        raise HTTPException(status_code=404, detail="Instance not found")
+    
+    delete_instance(instance_id, user["username"])
+    return {"message": "Instance deleted successfully"}
+
+
+@app.post("/analyze", response_model=AnalyzeResponse)
+async def analyze_similarity(
+    request: AnalyzeRequest, user: dict = Depends(require_auth)
+):
+    """
+    Calculate similarity scores between a target file and other submissions.
+
+    Modes:
+    - "direct": One-pass parallel processing (memory efficient)
+    - "preprocess": Uses pre-stored embeddings (for after /preprocess call)
+    """
+    if request.target_file not in request.submissions:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Target file '{request.target_file}' not found in submissions",
+        )
+
+    options = request.preprocessing_options or {
+        "remove_comments": True,
+        "normalize_whitespace": True,
+        "preserve_variable_names": True,
+        "preserve_literals": False,
+    }
+
+    checker = FlexibleCodeSimilarityChecker(preprocessing_options=options)
+
+    # Use direct mode - parallel process + compare + discard
+    result = checker.analyze_direct(request.target_file, request.submissions)
+
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+
+    return AnalyzeResponse(
+        scores=result["scores"],
+        submission_names=result["submission_names"],
+        target_file=result["target_file"],
+    )
+
+
+@app.post("/preprocess", response_model=PreprocessResponse)
+async def preprocess_submissions(
+    request: PreprocessRequest, user: dict = Depends(require_auth)
+):
+    """
+    Parallel preprocess all submissions and return embeddings.
+    Raw text is discarded, only embeddings are returned.
+    Use this when you want to select a target AFTER preprocessing.
+    """
+    options = request.preprocessing_options or {
+        "remove_comments": True,
+        "normalize_whitespace": True,
+        "preserve_variable_names": True,
+        "preserve_literals": False,
+    }
+
+    checker = FlexibleCodeSimilarityChecker(preprocessing_options=options)
+    embeddings = checker.preprocess_all(request.submissions)
+
+    return PreprocessResponse(
+        embeddings=embeddings, count=len(embeddings), names=list(embeddings.keys())
+    )
+
+
+@app.post("/compare", response_model=AnalyzeResponse)
+async def compare_preprocessed(
+    request: CompareRequest, user: dict = Depends(require_auth)
+):
+    """
+    Compare target against preprocessed embeddings.
+    Use this after calling /preprocess endpoint.
+    """
+    if request.target_file not in request.embeddings:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Target file '{request.target_file}' not found in embeddings",
+        )
+
+    options = request.preprocessing_options or {}
+    checker = FlexibleCodeSimilarityChecker(preprocessing_options=options)
+
+    result = checker.compare_preprocessed(request.target_file, request.embeddings)
+
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+
+    return AnalyzeResponse(
+        scores=result["scores"],
+        submission_names=result["submission_names"],
+        target_file=result["target_file"],
+    )
+
+
+@app.post("/extract-text")
+async def extract_single_file(file: UploadFile = File(...)):
+    """Extract text from a single file."""
+    content = await file.read()
+    text = extract_text(content, file.filename)
+    return {"filename": file.filename, "text": text, "length": len(text)}
+
+
+@app.post("/upload-individual", response_model=ExtractResponse)
+async def upload_individual_files(
+    files: List[UploadFile] = File(...),
+    ignore_patterns: Optional[str] = None,
+    user: dict = Depends(require_auth),
+):
+    """Upload files where each file/ZIP = ONE submission."""
+    patterns = ignore_patterns.split(",") if ignore_patterns else None
+    all_submissions = {}
+
+    for file in files:
+        content = await file.read()
+
+        if file.filename.endswith(".zip"):
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as tmp:
+                tmp.write(content)
+                tmp_path = tmp.name
+            try:
+                combined_text = extract_zip_as_single(tmp_path, file.filename, patterns)
+                if combined_text.strip():
+                    submission_name = file.filename.rsplit(".", 1)[0]
+                    all_submissions[submission_name] = combined_text
+            finally:
+                os.unlink(tmp_path)
+        else:
+            text = extract_text(content, file.filename)
+            if text.strip():
+                all_submissions[file.filename] = text
+
+    return ExtractResponse(submissions=all_submissions, count=len(all_submissions))
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, host="0.0.0.0", port=8000)
