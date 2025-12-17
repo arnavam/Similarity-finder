@@ -1,3 +1,12 @@
+---
+title: Copyadi Finder
+emoji: 🔍
+colorFrom: indigo
+colorTo: green
+sdk: docker
+pinned: false
+---
+
 # 🔍 Copyadi Finder
 
 A powerful code similarity detection tool that uses multiple analysis methods to find copied or similar code across submissions.
