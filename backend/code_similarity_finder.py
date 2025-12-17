@@ -12,7 +12,7 @@ import sys
 import psutil
 from difflib import SequenceMatcher
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Tuple, Any, Union
 
 import Levenshtein
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -110,10 +110,18 @@ class FlexibleCodeSimilarityChecker:
         scores["processed"] = Levenshtein.ratio(target["processed_text"], other["processed_text"])
         
         # 3. AST structure similarity
-        if target["ast"]["node_types"] and other["ast"]["node_types"]:
-            scores["ast"] = self.sequence_similarity(
-                target["ast"]["node_types"], other["ast"]["node_types"]
-            )
+        # Create new lists to avoid modifying cached embeddings
+        ast_seq1 = list(target["ast"]["node_types"])
+        ast_seq2 = list(other["ast"]["node_types"])
+        
+        # Include extracted function/variable names in comparison if available
+        # (These are populated based on preserve_variable_names option during extraction)
+        if target["ast"]["function_calls"] and other["ast"]["function_calls"]:
+            ast_seq1.extend(target["ast"]["function_calls"])
+            ast_seq2.extend(other["ast"]["function_calls"])
+
+        if ast_seq1 and ast_seq2:
+            scores["ast"] = self.sequence_similarity(ast_seq1, ast_seq2)
         else:
             scores["ast"] = 0.0
         
@@ -341,6 +349,32 @@ class FlexibleCodeSimilarityChecker:
                     lines.append(line)
             processed = "\n".join(lines)
 
+        # Handle literal preservation (or anonymization)
+        # If preserve_literals is False (default), we anonymize string/number literals
+        if not self.options.get("preserve_literals", False):
+            try:
+                tree = ast.parse(processed)
+                modified = False
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.Constant):
+                        # Anonymize strings (except docstrings which are handled by remove_comments)
+                        if isinstance(node.value, str):
+                            # Don't touch docstrings if they weren't removed? 
+                            # Actually, just anonymize all string literals to "STR"
+                            # If remove_comments ran, docstrings are already empty or gone from lines loop
+                            if node.value != "": 
+                                node.value = "STR"
+                                modified = True
+                        # Anonymize numbers
+                        elif isinstance(node.value, (int, float, complex)):
+                            node.value = 0
+                            modified = True
+                            
+                if modified:
+                    processed = ast.unparse(tree)
+            except:
+                pass
+
         return processed
 
     def extract_ast_features(self, code: str) -> dict:
@@ -384,6 +418,265 @@ class FlexibleCodeSimilarityChecker:
         if not seq1 or not seq2:
             return 0.0
         return SequenceMatcher(None, seq1, seq2).ratio()
+
+    # ===== Similar Regions Detection =====
+
+    def extract_code_blocks(self, code: str) -> Dict[str, dict]:
+        """
+        Extract functions and classes as separate AST nodes with metadata.
+        
+        Returns:
+            Dict mapping block name to block info (ast_dump, lines, source)
+        """
+        blocks = {}
+        try:
+            tree = ast.parse(code)
+            lines = code.split('\n')
+            
+            for node in ast.iter_child_nodes(tree):
+                if isinstance(node, ast.FunctionDef):
+                    block_name = f"func:{node.name}"
+                    try:
+                        source = ast.unparse(node)
+                    except:
+                        # Fallback: extract from source lines
+                        source = '\n'.join(lines[node.lineno - 1:node.end_lineno])
+                    
+                    # Normalize AST for comparison (remove names)
+                    normalized = self._normalize_ast_node(node)
+                    
+                    blocks[block_name] = {
+                        "type": "function",
+                        "name": node.name,
+                        "ast_dump": ast.dump(normalized),
+                        "lineno": node.lineno,
+                        "end_lineno": node.end_lineno,
+                        "source": source,
+                    }
+                    
+                elif isinstance(node, ast.ClassDef):
+                    block_name = f"class:{node.name}"
+                    try:
+                        source = ast.unparse(node)
+                    except:
+                        source = '\n'.join(lines[node.lineno - 1:node.end_lineno])
+                    
+                    normalized = self._normalize_ast_node(node)
+                    
+                    blocks[block_name] = {
+                        "type": "class",
+                        "name": node.name,
+                        "ast_dump": ast.dump(normalized),
+                        "lineno": node.lineno,
+                        "end_lineno": node.end_lineno,
+                        "source": source,
+                    }
+                    
+                    # Also extract methods within the class
+                    for item in node.body:
+                        if isinstance(item, ast.FunctionDef):
+                            method_name = f"class:{node.name}.{item.name}"
+                            try:
+                                method_source = ast.unparse(item)
+                            except:
+                                method_source = '\n'.join(lines[item.lineno - 1:item.end_lineno])
+                            
+                            normalized_method = self._normalize_ast_node(item)
+                            
+                            blocks[method_name] = {
+                                "type": "method",
+                                "name": f"{node.name}.{item.name}",
+                                "ast_dump": ast.dump(normalized_method),
+                                "lineno": item.lineno,
+                                "end_lineno": item.end_lineno,
+                                "source": method_source,
+                            }
+        except SyntaxError:
+            # Not valid Python, return empty
+            pass
+        except Exception:
+            pass
+            
+        return blocks
+
+    def _normalize_ast_node(self, node: ast.AST) -> ast.AST:
+        """
+        Normalize an AST node by replacing variable/function names with placeholders.
+        This makes comparison resilient to renaming.
+        """
+        import copy
+        node = copy.deepcopy(node)
+        
+        class NameNormalizer(ast.NodeTransformer):
+            def __init__(self):
+                self.name_map = {}
+                self.counter = 0
+                
+            def visit_Name(self, node):
+                if node.id not in self.name_map:
+                    self.name_map[node.id] = f"VAR_{self.counter}"
+                    self.counter += 1
+                node.id = self.name_map[node.id]
+                return node
+                
+            def visit_FunctionDef(self, node):
+                node.name = "FUNC"
+                self.generic_visit(node)
+                return node
+                
+            def visit_arg(self, node):
+                node.arg = "ARG"
+                return node
+        
+        try:
+            normalizer = NameNormalizer()
+            return normalizer.visit(node)
+        except:
+            return node
+
+    def find_similar_blocks(
+        self, 
+        code1: str, 
+        code2: str, 
+        threshold: float = 0.6
+    ) -> List[dict]:
+        """
+        Find similar functions/classes between two code files using AST comparison.
+        
+        Args:
+            code1: First code file content
+            code2: Second code file content
+            threshold: Minimum similarity to report (0.0 to 1.0)
+            
+        Returns:
+            List of matches with similarity scores and source code
+        """
+        blocks1 = self.extract_code_blocks(code1)
+        blocks2 = self.extract_code_blocks(code2)
+        
+        matches = []
+        
+        for name1, block1 in blocks1.items():
+            for name2, block2 in blocks2.items():
+                # Compare normalized AST structure
+                similarity = SequenceMatcher(
+                    None, block1["ast_dump"], block2["ast_dump"]
+                ).ratio()
+                
+                if similarity >= threshold:
+                    matches.append({
+                        "file1_block": name1,
+                        "file1_lines": [block1["lineno"], block1["end_lineno"]],
+                        "file1_source": block1["source"],
+                        "file2_block": name2,
+                        "file2_lines": [block2["lineno"], block2["end_lineno"]],
+                        "file2_source": block2["source"],
+                        "similarity": round(similarity, 4),
+                        "type": block1["type"],
+                    })
+        
+        # Sort by similarity (highest first)
+        return sorted(matches, key=lambda x: -x["similarity"])
+
+    def find_matching_token_sequences(
+        self, 
+        code1: str, 
+        code2: str, 
+        min_tokens: int = 5
+    ) -> List[dict]:
+        """
+        Find matching token sequences between two code files.
+        Uses spaCy tokenization for consistency with similarity scoring.
+        
+        Args:
+            code1: First code file content
+            code2: Second code file content
+            min_tokens: Minimum number of consecutive matching tokens to report
+            
+        Returns:
+            List of matching sequences with positions and text
+        """
+        # Use spaCy tokenization (same as similarity scoring)
+        tokens1 = self.tokenize_code(code1)
+        tokens2 = self.tokenize_code(code2)
+        
+        matcher = SequenceMatcher(None, tokens1, tokens2)
+        matches = []
+        
+        for block in matcher.get_matching_blocks():
+            if block.size >= min_tokens:
+                matched_tokens = tokens1[block.a : block.a + block.size]
+                matched_text = "".join(matched_tokens)  # spaCy preserves spacing info
+                
+                # Estimate line numbers by counting newlines in matched tokens
+                tokens_before_1 = tokens1[:block.a]
+                tokens_before_2 = tokens2[:block.b]
+                line1 = sum(1 for t in tokens_before_1 if '\n' in t) + 1
+                line2 = sum(1 for t in tokens_before_2 if '\n' in t) + 1
+                
+                # Better line estimation: reconstruct text and count newlines
+                text_before_1 = "".join(tokens_before_1)
+                text_before_2 = "".join(tokens_before_2)
+                line1 = text_before_1.count('\n') + 1
+                line2 = text_before_2.count('\n') + 1
+                
+                matches.append({
+                    "file1_token_pos": block.a,
+                    "file1_approx_line": line1,
+                    "file2_token_pos": block.b,
+                    "file2_approx_line": line2,
+                    "token_count": block.size,
+                    "matched_text": matched_text[:500],  # Truncate for display
+                })
+        
+        # Sort by length (longest first)
+        return sorted(matches, key=lambda x: -x["token_count"])
+
+    def get_similar_regions(
+        self, 
+        code1: str, 
+        code2: str,
+        block_threshold: float = 0.6,
+        min_tokens: int = 10
+    ) -> dict:
+        """
+        Get detailed similarity regions between two code files.
+        Combines AST-based function matching with token sequence matching.
+        
+        Args:
+            code1: First code file content
+            code2: Second code file content
+            block_threshold: Minimum similarity for function/class matches
+            min_tokens: Minimum tokens for sequence matches
+            
+        Returns:
+            Dict with function_matches, token_matches, and overall_similarity
+        """
+        start_time = time.time()
+        
+        # Get AST-based function/class matches
+        function_matches = self.find_similar_blocks(code1, code2, block_threshold)
+        
+        # Get token sequence matches
+        token_matches = self.find_matching_token_sequences(code1, code2, min_tokens)
+        
+        # Calculate overall similarity
+        overall_similarity = Levenshtein.ratio(code1, code2)
+        
+        elapsed = time.time() - start_time
+        
+        return {
+            "function_matches": function_matches[:20],  # Top 20 function matches
+            "token_matches": token_matches[:10],  # Top 10 token sequences
+            "overall_similarity": round(overall_similarity, 4),
+            "stats": {
+                "file1_blocks": len(self.extract_code_blocks(code1)),
+                "file2_blocks": len(self.extract_code_blocks(code2)),
+                "total_function_matches": len(function_matches),
+                "total_token_matches": len(token_matches),
+                "analysis_time": round(elapsed, 4),
+            }
+        }
 
     # ===== Legacy API (backwards compatible) =====
 

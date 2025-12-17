@@ -29,6 +29,7 @@ ENV PATH=/root/.local/bin:$PATH
 
 # Copy application code (API only - Streamlit runs separately)
 COPY backend/ ./backend/
+COPY test/ ./test/
 COPY start.sh .
 
 # Make startup script executable

@@ -19,7 +19,7 @@ try:
     requests.get("http://localhost:8000/", timeout=1)
     API_BASE_URL = "http://localhost:8000"
 except:
-    API_BASE_URL = "https://huggingface.co/spaces/arnavam/copyadi-finder"
+    API_BASE_URL = "https://arnavam-copyadi-finder.hf.space"
 
 
 # ===== Auth Helper Functions =====
@@ -370,32 +370,173 @@ def upload_individual_to_api(files, ignore_patterns=None):
         return {}
 
 
+def get_similar_regions_via_api(file1_name, file1_content, file2_name, file2_content):
+    """Get detailed similar regions between two files."""
+    if not is_logged_in():
+        st.error("Please login first")
+        return None
+
+    try:
+        response = requests.post(
+            f"{API_BASE_URL}/similar-regions",
+            json={
+                "file1_name": file1_name,
+                "file1_content": file1_content,
+                "file2_name": file2_name,
+                "file2_content": file2_content,
+                "block_threshold": 0.6,
+                "min_tokens": 10,
+            },
+            headers=get_auth_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 401:
+            st.error("Session expired. Please login again.")
+            logout_user()
+        else:
+            st.error(f"API Error: {e}")
+        return None
+    except Exception as e:
+        st.error(f"API Error: {e}")
+        return None
+
+
+
 def display_results(result):
-    """Display similarity analysis results."""
-    st.header("📈 Results")
+    """Display similarity analysis results (Table Only)."""
+    scores = result.get("scores", {})
+    submission_names = result.get("submission_names", [])
+    
+    if not scores or not submission_names:
+        st.warning("No results to display")
+        return
 
-    scores = result["scores"]
-    submission_names = result["submission_names"]
+    # 1. Calculate Aggregates
+    data = []
+    for i, name in enumerate(submission_names):
+        row = {"Submission": name}
+        total_score = 0
+        count = 0
+        
+        for cat, values in scores.items():
+            if values and i < len(values):
+                # Normalize key name (e.g., "raw_scores" -> "Raw")
+                clean_cat = cat.replace("_scores", "").title()
+                val = values[i]
+                row[clean_cat] = val
+                total_score += val
+                count += 1
+        
+        # Calculate average/overall score
+        row["Overall Match"] = total_score / count if count > 0 else 0
+        data.append(row)
+    
+    # Sort by Overall Match
+    data.sort(key=lambda x: x["Overall Match"], reverse=True)
+    
+    # 2. Display Table
+    st.header("📊 Similarity Metrics")
+    
+    if len(data) > 0:
+        st.dataframe(
+            data, 
+            use_container_width=True,
+            column_config={
+                "Overall Match": st.column_config.ProgressColumn(
+                    "Overall Match",
+                    format="%.1f%%",
+                    min_value=0,
+                    max_value=1,
+                ),
+                "Submission": st.column_config.TextColumn("File Name"),
+                "Raw": st.column_config.NumberColumn("Raw Text", format="%.1f%%"),
+                "Processed": st.column_config.NumberColumn("Processed", format="%.1f%%"),
+                "Ast": st.column_config.NumberColumn("Structure (AST)", format="%.1f%%"),
+                "Token": st.column_config.NumberColumn("Token Seq", format="%.1f%%"),
+                "Cosine": st.column_config.NumberColumn("Cosine (TF-IDF)", format="%.1f%%"),
+            }
+        )
 
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("Total Submissions", len(submission_names))
-    with col2:
-        st.metric("Score Types", len(scores))
-    with col3:
-        if scores:
-            all_values = [v for vals in scores.values() for v in vals if vals]
-            if all_values:
-                max_score = max(all_values)
-                st.metric("Highest Similarity", f"{max_score:.2%}")
 
-    st.subheader("Similar Submissions Found")
-    for score_type, score_values in scores.items():
-        if score_values:
-            max_idx = np.argmax(score_values)
-            st.write(
-                f"**{score_type}**: {submission_names[max_idx]} = {max(score_values):.2%}"
-            )
+def display_similar_regions(regions_result, file1_name, file2_name):
+    """Display detailed similar regions with polished side-by-side code blocks."""
+    st.markdown("---")
+    st.header(f"⚖️ Comparison: {file1_name} vs {file2_name}")
+    
+    # Score Dashboard
+    stats = regions_result.get("stats", {})
+    overall_sim = regions_result.get('overall_similarity', 0)
+    
+    # Color logic
+    sim_color = "red" if overall_sim > 0.7 else "orange" if overall_sim > 0.4 else "green"
+    
+    # Top stats row
+    kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+    kpi1.metric("Overall Similarity", f"{overall_sim:.1%}")
+    kpi2.metric("Function Matches", stats.get("total_function_matches", 0))
+    kpi3.metric("Token Matches", stats.get("total_token_matches", 0))
+    kpi4.metric("Process Time", f"{stats.get('analysis_time', 0):.3f}s")
+    
+    st.markdown("---")
+
+    # 1. Structural Matches (Functions/Classes)
+    function_matches = regions_result.get("function_matches", [])
+    
+    with st.expander(f"🧩 Similar Functions & Classes ({len(function_matches)})", expanded=True):
+        if function_matches:
+            st.caption("Matches found via AST analysis (resilient to renamed variables).")
+            
+            for match in function_matches[:10]:
+                similarity = match["similarity"]
+                
+                # Visual separator
+                st.markdown(f"##### {match['type'].title()}: `{match['file1_block']}` ↔ `{match['file2_block']}`")
+                
+                # Progress bar for this specific match
+                c_score, c_bar = st.columns([1, 5])
+                with c_score:
+                    st.markdown(f"**{similarity:.1%}** match")
+                with c_bar:
+                    bar_color = ":red[" if similarity > 0.8 else ":orange[" if similarity > 0.6 else ":green["
+                    st.progress(similarity)
+
+                # Comparison View
+                c_left, c_right = st.columns(2)
+                with c_left:
+                    st.markdown(f"**{file1_name}** (L{match['file1_lines'][0]}-{match['file1_lines'][1]})")
+                    st.code(match["file1_source"], language="python")
+                
+                with c_right:
+                    st.markdown(f"**{file2_name}** (L{match['file2_lines'][0]}-{match['file2_lines'][1]})")
+                    st.code(match["file2_source"], language="python")
+                
+                st.divider()
+        else:
+            st.info("No structural matches found.")
+
+    # 2. Exact/Token Matches
+    token_matches = regions_result.get("token_matches", [])
+    
+    with st.expander(f"📝 Exact Token Sequences ({len(token_matches)})", expanded=True):
+        if token_matches:
+            st.caption("Matches found via token sequence analysis (copy-paste detection).")
+            
+            # Show top matches in a cleaner grid
+            for i, match in enumerate(token_matches[:10]):
+                st.markdown(f"**Match #{i+1}**: {match['token_count']} matching tokens")
+                
+                c1, c2 = st.columns(2)
+                c1.info(f"📍 {file1_name}: Line ~{match['file1_approx_line']}")
+                c2.info(f"📍 {file2_name}: Line ~{match['file2_approx_line']}")
+                
+                st.code(match["matched_text"], language="python")
+                st.markdown("<br>", unsafe_allow_html=True)
+        else:
+            st.info("No token sequences found.")
+
+
 
 
 def main():
@@ -535,7 +676,7 @@ def main():
         remove_comments = st.sidebar.checkbox("Remove Comments", value=True)
         normalize_whitespace = st.sidebar.checkbox("Normalize Whitespace", value=True)
         preserve_variable_names = st.sidebar.checkbox("Preserve Variable Names", value=True)
-        preserve_literals = st.sidebar.checkbox("Preserve Literals", value=False)
+        anonymize_literals = st.sidebar.checkbox("Anonymize Literals", value=True)
 
         # OS junk patterns - always filtered
         OS_JUNK_PATTERNS = [
@@ -561,7 +702,7 @@ def main():
             "remove_comments": remove_comments,
             "normalize_whitespace": normalize_whitespace,
             "preserve_variable_names": preserve_variable_names,
-            "preserve_literals": preserve_literals,
+            "preserve_literals": not anonymize_literals,
         }
 
         st.sidebar.divider()
@@ -746,6 +887,66 @@ def main():
     if "analysis_result" in st.session_state and st.session_state.analysis_result:
         st.divider()
         display_results(st.session_state.analysis_result)
+        
+        # ===== Similar Regions Detail View =====
+        result = st.session_state.analysis_result
+        if result.get("submission_names") and all_submissions:
+            st.divider()
+            st.subheader("🔬 Detailed Comparison")
+            st.caption("View which specific functions/code blocks are similar")
+            
+            # Find the most similar file
+            scores = result.get("scores", {})
+            submission_names = result.get("submission_names", [])
+            target_file = result.get("target_file", "")
+            
+            # Calculate average score for each submission
+            avg_scores = []
+            for i, name in enumerate(submission_names):
+                score_sum = 0
+                score_count = 0
+                for score_type, score_values in scores.items():
+                    if score_values and i < len(score_values):
+                        score_sum += score_values[i]
+                        score_count += 1
+                avg_scores.append(score_sum / score_count if score_count > 0 else 0)
+            
+            # Sort by average score (descending)
+            sorted_submissions = sorted(
+                zip(submission_names, avg_scores),
+                key=lambda x: -x[1]
+            )
+            
+            # Let user select which file to compare in detail
+            compare_options = [f"{name} ({score:.1%})" for name, score in sorted_submissions]
+            selected_compare = st.selectbox(
+                "Select file to compare with target:",
+                compare_options,
+                key="compare_detail_select"
+            )
+            
+            # Extract selected file name
+            selected_file = sorted_submissions[compare_options.index(selected_compare)][0]
+            
+            if st.button("🔬 View Similar Regions", use_container_width=True, type="primary"):
+                if target_file in all_submissions and selected_file in all_submissions:
+                    with st.spinner("Analyzing code regions..."):
+                        regions_result = get_similar_regions_via_api(
+                            target_file,
+                            all_submissions[target_file],
+                            selected_file,
+                            all_submissions[selected_file]
+                        )
+                    if regions_result:
+                        st.session_state.regions_result = regions_result
+                        st.session_state.regions_files = (target_file, selected_file)
+                else:
+                    st.error("Cannot find file content for comparison")
+        
+        # Display similar regions if available
+        if "regions_result" in st.session_state and st.session_state.regions_result:
+            file1, file2 = st.session_state.get("regions_files", ("File 1", "File 2"))
+            display_similar_regions(st.session_state.regions_result, file1, file2)
 
 
 if __name__ == "__main__":

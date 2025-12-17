@@ -41,7 +41,6 @@ def get_users_collection():
             _users_collection = _db["users"]
             # Create unique index on username
             _users_collection.create_index("username", unique=True)
-            print(f"✅ Connected to MongoDB: {MONGO_URL}")
         except Exception as e:
             print(f"⚠️ MongoDB connection failed: {e}")
             raise

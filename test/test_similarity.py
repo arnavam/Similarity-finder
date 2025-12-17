@@ -1,13 +1,16 @@
 """
 Test file for the optimized code similarity checker.
-Run with: python test_similarity.py
+Run with: python test_similarity.py (inside Docker container)
 """
 
 import time
 import sys
+import os
 
-# Add backend to path
-sys.path.insert(0, '/Users/arnav/Code/Copyadi-finder/backend')
+# Add backend to path (works in Docker container)
+sys.path.insert(0, '/app/backend')
+# Also try local path for local testing
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'backend'))
 
 from code_similarity_finder import FlexibleCodeSimilarityChecker
 
@@ -159,6 +162,111 @@ def test_legacy_api():
     print(f"  ✅ Submission names: {checker.submission_names}")
 
 
+def test_similar_regions():
+    """Test the new similar regions detection feature."""
+    print("\n=== Test: Similar Regions Detection ===")
+    
+    checker = FlexibleCodeSimilarityChecker()
+    
+    # Two similar codes with renamed variables
+    code1 = '''
+def calculate_sum(numbers):
+    total = 0
+    for num in numbers:
+        total += num
+    return total
+
+def get_average(numbers):
+    return calculate_sum(numbers) / len(numbers)
+
+class DataProcessor:
+    def __init__(self, data):
+        self.data = data
+    
+    def process(self):
+        return [x * 2 for x in self.data]
+'''
+    
+    code2 = '''
+def compute_total(data):
+    result = 0
+    for item in data:
+        result += item
+    return result
+
+def find_mean(data):
+    return compute_total(data) / len(data)
+
+class NumberHandler:
+    def __init__(self, numbers):
+        self.numbers = numbers
+    
+    def transform(self):
+        return [n * 2 for n in self.numbers]
+'''
+    
+    start = time.time()
+    result = checker.get_similar_regions(code1, code2)
+    elapsed = time.time() - start
+    
+    # Basic assertions
+    assert 'function_matches' in result, "Missing function_matches"
+    assert 'token_matches' in result, "Missing token_matches"
+    assert 'overall_similarity' in result, "Missing overall_similarity"
+    assert 'stats' in result, "Missing stats"
+    
+    print(f"  ✅ Overall Similarity: {result['overall_similarity']:.1%}")
+    print(f"  ✅ Function Matches: {result['stats']['total_function_matches']}")
+    print(f"  ✅ Token Matches: {result['stats']['total_token_matches']}")
+    print(f"  ✅ Analysis Time: {elapsed:.4f}s")
+    
+    # Check that similar functions were detected
+    function_matches = result['function_matches']
+    if function_matches:
+        print("\n  Top Function Matches:")
+        for match in function_matches[:3]:
+            print(f"    {match['file1_block']} ↔ {match['file2_block']}: {match['similarity']:.1%}")
+    
+    # The similar functions should be detected even with renamed variables
+    assert len(function_matches) > 0, "Should detect at least one similar function"
+    
+    # Check the highest similarity match
+    top_match = function_matches[0]
+    assert top_match['similarity'] >= 0.5, "Top match should have reasonable similarity"
+    
+    print("  ✅ Similar regions detection works correctly")
+
+
+def test_extract_code_blocks():
+    """Test AST-based code block extraction."""
+    print("\n=== Test: Extract Code Blocks ===")
+    
+    checker = FlexibleCodeSimilarityChecker()
+    
+    code = '''
+def standalone_func():
+    return 42
+
+class MyClass:
+    def method_one(self):
+        pass
+    
+    def method_two(self, x):
+        return x * 2
+'''
+    
+    blocks = checker.extract_code_blocks(code)
+    
+    assert 'func:standalone_func' in blocks, "Should extract standalone function"
+    assert 'class:MyClass' in blocks, "Should extract class"
+    assert 'class:MyClass.method_one' in blocks, "Should extract class method"
+    assert 'class:MyClass.method_two' in blocks, "Should extract class method"
+    
+    print(f"  ✅ Extracted {len(blocks)} code blocks:")
+    for name, block in blocks.items():
+        print(f"    {name} ({block['type']}): lines {block['lineno']}-{block['end_lineno']}")
+
+
 def main():
     print("=" * 60)
     print("Testing Optimized Code Similarity Checker")
@@ -171,6 +279,8 @@ def main():
         test_preprocess_all()
         test_compare_preprocessed()
         test_legacy_api()
+        test_extract_code_blocks()
+        test_similar_regions()
         
         print("\n" + "=" * 60)
         print("✅ ALL TESTS PASSED!")

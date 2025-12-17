@@ -400,6 +400,7 @@ def extract_from_folder(
     return submissions
 
 
+
 def _should_ignore(name: str, patterns: List[str]) -> bool:
     """Check if a file/folder name matches any ignore pattern."""
     for pattern in patterns:
@@ -409,3 +410,31 @@ def _should_ignore(name: str, patterns: List[str]) -> bool:
         if pattern.lstrip('*') in name:
             return True
     return False
+
+
+def _extract_notebook_code(file_path: str) -> str:
+    """
+    Extract only code cells from a Jupyter notebook.
+    Ignores markdown cells and outputs.
+    """
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            notebook = json.load(f)
+            
+        code_cells = []
+        for cell in notebook.get('cells', []):
+            if cell.get('cell_type') == 'code':
+                source = cell.get('source', [])
+                # Handle both list of strings (standard) and single string
+                if isinstance(source, list):
+                    code_content = ''.join(source)
+                else:
+                    code_content = str(source)
+                
+                if code_content.strip():
+                    code_cells.append(code_content)
+                    
+        return "\n\n# === CELL SEPARATOR ===\n\n".join(code_cells)
+    except Exception:
+        # If json load fails or structure is invalid, return empty
+        return ""

@@ -92,6 +92,16 @@ class PreprocessResponse(BaseModel):
     names: List[str]
 
 
+class SimilarRegionsRequest(BaseModel):
+    """Request to get detailed similar regions between two files."""
+    file1_name: str
+    file1_content: str
+    file2_name: str
+    file2_content: str
+    block_threshold: float = 0.6  # Minimum similarity for function/class matches
+    min_tokens: int = 10  # Minimum tokens for sequence matches
+
+
 # ===== Endpoints =====
 
 
@@ -349,6 +359,36 @@ async def upload_individual_files(
                 all_submissions[file.filename] = text
 
     return ExtractResponse(submissions=all_submissions, count=len(all_submissions))
+
+
+@app.post("/similar-regions")
+async def get_similar_regions(
+    request: SimilarRegionsRequest,
+    user: dict = Depends(require_auth)
+):
+    """
+    Get detailed similar regions between two files.
+    
+    Returns:
+    - function_matches: Similar functions/classes found via AST comparison
+    - token_matches: Matching token sequences
+    - overall_similarity: Overall Levenshtein similarity
+    - stats: Analysis statistics
+    """
+    checker = FlexibleCodeSimilarityChecker()
+    
+    result = checker.get_similar_regions(
+        code1=request.file1_content,
+        code2=request.file2_content,
+        block_threshold=request.block_threshold,
+        min_tokens=request.min_tokens,
+    )
+    
+    return {
+        "file1": request.file1_name,
+        "file2": request.file2_name,
+        **result,
+    }
 
 
 if __name__ == "__main__":

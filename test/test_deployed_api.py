@@ -4,9 +4,9 @@ import json
 
 # matches streamlit logic
 import os
+API_URL = "https://arnavam-copyadi-finder.hf.space"
 
-
-BASE_URL = os.environ.get("API_URL", "http://localhost:8000")
+BASE_URL = API_URL
 # Remove trailing slash if present
 BASE_URL = BASE_URL.rstrip("/")
 USERNAME = "Arnav"
