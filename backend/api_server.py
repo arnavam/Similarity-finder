@@ -262,11 +262,7 @@ async def analyze_similarity(
     - "direct": One-pass parallel processing (memory efficient)
     - "preprocess": Uses pre-stored embeddings (for after /preprocess call)
     """
-    if request.target_file not in request.submissions:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Target file '{request.target_file}' not found in submissions",
-        )
+
 
     options = request.preprocessing_options or {
         "remove_comments": True,
@@ -423,7 +419,7 @@ async def upload_individual_files(
 
 
 @app.post("/similar-regions")
-async def get_similar_regions(
+async def compute_similar_regions(
     request: SimilarRegionsRequest,
     user: dict = Depends(require_auth)
 ):
