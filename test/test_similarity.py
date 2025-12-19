@@ -12,7 +12,11 @@ sys.path.insert(0, '/app/backend')
 # Also try local path for local testing
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'backend'))
 
-from code_similarity_finder import FlexibleCodeSimilarityChecker
+from code_similarity_finder import (
+    FlexibleCodeSimilarityChecker,
+    get_similar_regions,
+    extract_code_blocks,
+)
 
 
 def test_process_to_embeddings():
@@ -166,8 +170,6 @@ def test_similar_regions():
     """Test the new similar regions detection feature."""
     print("\n=== Test: Similar Regions Detection ===")
     
-    checker = FlexibleCodeSimilarityChecker()
-    
     # Two similar codes with renamed variables
     code1 = '''
 def calculate_sum(numbers):
@@ -206,7 +208,7 @@ class NumberHandler:
 '''
     
     start = time.time()
-    result = checker.get_similar_regions(code1, code2)
+    result = get_similar_regions(code1, code2)
     elapsed = time.time() - start
     
     # Basic assertions
@@ -241,8 +243,6 @@ def test_extract_code_blocks():
     """Test AST-based code block extraction."""
     print("\n=== Test: Extract Code Blocks ===")
     
-    checker = FlexibleCodeSimilarityChecker()
-    
     code = '''
 def standalone_func():
     return 42
@@ -255,7 +255,7 @@ class MyClass:
         return x * 2
 '''
     
-    blocks = checker.extract_code_blocks(code)
+    blocks = extract_code_blocks(code)
     
     assert 'func:standalone_func' in blocks, "Should extract standalone function"
     assert 'class:MyClass' in blocks, "Should extract class"

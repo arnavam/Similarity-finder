@@ -7,12 +7,8 @@ Two modes:
 - Preprocess: Upload → Preprocess → Select target → Compare (keeps embeddings)
 """
 
-import os
-
-import numpy as np
 import requests
 import streamlit as st
-
 
 # API endpoint - tries localhost first, falls back to remote
 try:
@@ -51,13 +47,13 @@ def register_user(username: str, password: str, invite_code: str = None) -> bool
         payload = {"username": username, "password": password}
         if invite_code:
             payload["invite_code"] = invite_code
-        
+
         response = requests.post(
             f"{API_BASE_URL}/auth/register",
             json=payload,
         )
         if response.status_code == 200:
-            st.success(f"✅ Registered! Please login with your credentials.")
+            st.success("✅ Registered! Please login with your credentials.")
             return True
         else:
             # Handle non-JSON error responses
@@ -114,7 +110,7 @@ def upload_files_to_api(files, ignore_patterns=None):
 
     try:
         response = requests.post(
-            f"{API_BASE_URL}/upload",
+            f"{API_BASE_URL}/extract/upload",
             files=file_data,
             params=params,
             headers=get_auth_headers(),
@@ -141,7 +137,7 @@ def process_github_via_api(urls, ignore_patterns=None):
 
     try:
         response = requests.post(
-            f"{API_BASE_URL}/github",
+            f"{API_BASE_URL}/extract/urls",
             json={"urls": urls, "ignore_patterns": ignore_patterns},
             headers=get_auth_headers(),
         )
@@ -254,7 +250,8 @@ def analyze_direct_via_api(submissions, target_file, preprocessing_options):
         response = requests.post(
             f"{API_BASE_URL}/analyze",
             json={
-                "submissions": submissions,
+                "submissions": submissions if not st.session_state.get("buffer_id") else None,
+                "buffer_id": st.session_state.get("buffer_id"),
                 "target_file": target_file,
                 "preprocessing_options": preprocessing_options,
                 "mode": "direct",
@@ -285,7 +282,8 @@ def preprocess_via_api(submissions, preprocessing_options):
         response = requests.post(
             f"{API_BASE_URL}/preprocess",
             json={
-                "submissions": submissions,
+                "submissions": submissions if not st.session_state.get("buffer_id") else None,
+                "buffer_id": st.session_state.get("buffer_id"),
                 "preprocessing_options": preprocessing_options,
             },
             headers=get_auth_headers(),
@@ -380,6 +378,7 @@ def get_similar_regions_via_api(file1_name, file1_content, file2_name, file2_con
         response = requests.post(
             f"{API_BASE_URL}/similar-regions",
             json={
+                "buffer_id": st.session_state.get("buffer_id"),
                 "file1_name": file1_name,
                 "file1_content": file1_content,
                 "file2_name": file2_name,
@@ -403,12 +402,11 @@ def get_similar_regions_via_api(file1_name, file1_content, file2_name, file2_con
         return None
 
 
-
 def display_results(result):
     """Display similarity analysis results (Table Only)."""
     scores = result.get("scores", {})
     submission_names = result.get("submission_names", [])
-    
+
     if not scores or not submission_names:
         st.warning("No results to display")
         return
@@ -419,7 +417,7 @@ def display_results(result):
         row = {"Submission": name}
         total_score = 0
         count = 0
-        
+
         for cat, values in scores.items():
             if values and i < len(values):
                 # Normalize key name (e.g., "raw_scores" -> "Raw")
@@ -428,20 +426,20 @@ def display_results(result):
                 row[clean_cat] = val
                 total_score += val
                 count += 1
-        
+
         # Calculate average/overall score
         row["Overall Match"] = total_score / count if count > 0 else 0
         data.append(row)
-    
+
     # Sort by Overall Match
     data.sort(key=lambda x: x["Overall Match"], reverse=True)
-    
+
     # 2. Display Table
     st.header("📊 Similarity Metrics")
-    
+
     if len(data) > 0:
         st.dataframe(
-            data, 
+            data,
             use_container_width=True,
             column_config={
                 "Overall Match": st.column_config.ProgressColumn(
@@ -452,11 +450,17 @@ def display_results(result):
                 ),
                 "Submission": st.column_config.TextColumn("File Name"),
                 "Raw": st.column_config.NumberColumn("Raw Text", format="%.1f%%"),
-                "Processed": st.column_config.NumberColumn("Processed", format="%.1f%%"),
-                "Ast": st.column_config.NumberColumn("Structure (AST)", format="%.1f%%"),
+                "Processed": st.column_config.NumberColumn(
+                    "Processed", format="%.1f%%"
+                ),
+                "Ast": st.column_config.NumberColumn(
+                    "Structure (AST)", format="%.1f%%"
+                ),
                 "Token": st.column_config.NumberColumn("Token Seq", format="%.1f%%"),
-                "Cosine": st.column_config.NumberColumn("Cosine (TF-IDF)", format="%.1f%%"),
-            }
+                "Cosine": st.column_config.NumberColumn(
+                    "Cosine (TF-IDF)", format="%.1f%%"
+                ),
+            },
         )
 
 
@@ -464,79 +468,105 @@ def display_similar_regions(regions_result, file1_name, file2_name):
     """Display detailed similar regions with polished side-by-side code blocks."""
     st.markdown("---")
     st.header(f"⚖️ Comparison: {file1_name} vs {file2_name}")
-    
+
     # Score Dashboard
     stats = regions_result.get("stats", {})
-    overall_sim = regions_result.get('overall_similarity', 0)
-    
+    overall_sim = regions_result.get("overall_similarity", 0)
+
     # Color logic
-    sim_color = "red" if overall_sim > 0.7 else "orange" if overall_sim > 0.4 else "green"
-    
+    sim_color = (
+        "red" if overall_sim > 0.7 else "orange" if overall_sim > 0.4 else "green"
+    )
+
     # Top stats row
     kpi1, kpi2, kpi3, kpi4 = st.columns(4)
     kpi1.metric("Overall Similarity", f"{overall_sim:.1%}")
     kpi2.metric("Function Matches", stats.get("total_function_matches", 0))
     kpi3.metric("Token Matches", stats.get("total_token_matches", 0))
     kpi4.metric("Process Time", f"{stats.get('analysis_time', 0):.3f}s")
-    
+
     st.markdown("---")
 
     # 1. Structural Matches (Functions/Classes)
     function_matches = regions_result.get("function_matches", [])
-    
-    with st.expander(f"🧩 Similar Functions & Classes ({len(function_matches)})", expanded=True):
+
+    with st.expander(
+        f"🧩 Similar Functions & Classes ({len(function_matches)})", expanded=True
+    ):
         if function_matches:
-            st.caption("Matches found via AST analysis (resilient to renamed variables).")
-            
+            st.caption(
+                "Matches found via AST analysis (resilient to renamed variables)."
+            )
+
             for match in function_matches[:10]:
                 similarity = match["similarity"]
-                
+
                 # Visual separator
-                st.markdown(f"##### {match['type'].title()}: `{match['file1_block']}` ↔ `{match['file2_block']}`")
-                
+                st.markdown(
+                    f"##### {match['type'].title()}: `{match['file1_block']}` ↔ `{
+                        match['file2_block']
+                    }`"
+                )
+
                 # Progress bar for this specific match
                 c_score, c_bar = st.columns([1, 5])
                 with c_score:
                     st.markdown(f"**{similarity:.1%}** match")
                 with c_bar:
-                    bar_color = ":red[" if similarity > 0.8 else ":orange[" if similarity > 0.6 else ":green["
+                    bar_color = (
+                        ":red["
+                        if similarity > 0.8
+                        else ":orange["
+                        if similarity > 0.6
+                        else ":green["
+                    )
                     st.progress(similarity)
 
                 # Comparison View
                 c_left, c_right = st.columns(2)
                 with c_left:
-                    st.markdown(f"**{file1_name}** (L{match['file1_lines'][0]}-{match['file1_lines'][1]})")
+                    st.markdown(
+                        f"**{file1_name}** (L{match['file1_lines'][0]}-{
+                            match['file1_lines'][1]
+                        })"
+                    )
                     st.code(match["file1_source"], language="python")
-                
+
                 with c_right:
-                    st.markdown(f"**{file2_name}** (L{match['file2_lines'][0]}-{match['file2_lines'][1]})")
+                    st.markdown(
+                        f"**{file2_name}** (L{match['file2_lines'][0]}-{
+                            match['file2_lines'][1]
+                        })"
+                    )
                     st.code(match["file2_source"], language="python")
-                
+
                 st.divider()
         else:
             st.info("No structural matches found.")
 
     # 2. Exact/Token Matches
     token_matches = regions_result.get("token_matches", [])
-    
+
     with st.expander(f"📝 Exact Token Sequences ({len(token_matches)})", expanded=True):
         if token_matches:
-            st.caption("Matches found via token sequence analysis (copy-paste detection).")
-            
+            st.caption(
+                "Matches found via token sequence analysis (copy-paste detection)."
+            )
+
             # Show top matches in a cleaner grid
             for i, match in enumerate(token_matches[:10]):
-                st.markdown(f"**Match #{i+1}**: {match['token_count']} matching tokens")
-                
+                st.markdown(
+                    f"**Match #{i + 1}**: {match['token_count']} matching tokens"
+                )
+
                 c1, c2 = st.columns(2)
                 c1.info(f"📍 {file1_name}: Line ~{match['file1_approx_line']}")
                 c2.info(f"📍 {file2_name}: Line ~{match['file2_approx_line']}")
-                
+
                 st.code(match["matched_text"], language="python")
                 st.markdown("<br>", unsafe_allow_html=True)
         else:
             st.info("No token sequences found.")
-
-
 
 
 def main():
@@ -544,8 +574,6 @@ def main():
 
     st.title("🔍 Copyadi Checker")
     st.markdown("Compare new submissions against batch uploads of previous submissions")
-
-
 
     # ===== Sidebar Logic =====
 
@@ -561,32 +589,40 @@ def main():
         st.sidebar.error("❌ API Not Running")
         st.sidebar.info(f"Start API: `{API_BASE_URL}`")
 
-    
     if api_connected:
         if not is_logged_in():
             # --- Not Logged In: Show Login First ---
             st.sidebar.header("🔐 Account")
             auth_tab1, auth_tab2 = st.sidebar.tabs(["🔑 Login", "📝 Register"])
-            
+
             with auth_tab1:
                 with st.form("login_form"):
                     username = st.text_input("Username", key="login_username")
-                    password = st.text_input("Password", type="password", key="login_password")
+                    password = st.text_input(
+                        "Password", type="password", key="login_password"
+                    )
                     submit = st.form_submit_button("Login", type="primary")
 
                     if submit and username and password:
                         if login_user(username, password):
                             st.rerun()
-            
+
             with auth_tab2:
                 with st.form("register_form"):
                     reg_username = st.text_input("Username", key="reg_username")
-                    reg_password = st.text_input("Password", type="password", key="reg_password")
-                    reg_confirm = st.text_input("Confirm Password", type="password", key="reg_confirm")
-                    invite_code = st.text_input("Invite Code", key="invite_code", 
-                                            help="Required. Get this from an admin.")
+                    reg_password = st.text_input(
+                        "Password", type="password", key="reg_password"
+                    )
+                    reg_confirm = st.text_input(
+                        "Confirm Password", type="password", key="reg_confirm"
+                    )
+                    invite_code = st.text_input(
+                        "Invite Code",
+                        key="invite_code",
+                        help="Required. Get this from an admin.",
+                    )
                     reg_submit = st.form_submit_button("Register")
-                    
+
                     if reg_submit:
                         if not reg_username or not reg_password:
                             st.warning("Please fill all fields")
@@ -597,54 +633,63 @@ def main():
                         else:
                             if register_user(reg_username, reg_password, invite_code):
                                 pass  # Success message shown in function
-            
+
             st.sidebar.divider()
 
         else:
             # --- Logged In: Show Workspaces First ---
             st.sidebar.subheader("📦 Workspaces")
-            
+
             instances = fetch_instances()
-            
+
             if instances:
                 # Create display names for selector
-                instance_options = {inst["instance_id"]: f"{inst['name']}" for inst in instances}
-                
+                instance_options = {
+                    inst["instance_id"]: f"{inst['name']}" for inst in instances
+                }
+
                 # Initialize current instance if not set
                 if "current_instance_id" not in st.session_state:
                     st.session_state.current_instance_id = instances[0]["instance_id"]
-                
+
                 # Instance selector
                 selected_id = st.sidebar.selectbox(
                     "Select Workspace",
                     options=list(instance_options.keys()),
                     format_func=lambda x: instance_options.get(x, x),
-                    index=list(instance_options.keys()).index(st.session_state.current_instance_id) 
-                        if st.session_state.current_instance_id in instance_options else 0,
-                    key="instance_selector"
+                    index=list(instance_options.keys()).index(
+                        st.session_state.current_instance_id
+                    )
+                    if st.session_state.current_instance_id in instance_options
+                    else 0,
+                    key="instance_selector",
                 )
-                
+
                 # If instance changed, update state
                 if selected_id != st.session_state.current_instance_id:
                     st.session_state.current_instance_id = selected_id
                     st.rerun()
-                
+
                 # Show current instance info
-                current_inst = next((i for i in instances if i["instance_id"] == selected_id), None)
+                current_inst = next(
+                    (i for i in instances if i["instance_id"] == selected_id), None
+                )
                 if current_inst:
                     if current_inst.get("description"):
                         st.sidebar.caption(current_inst["description"])
-                    
+
                     # Show stored URLs for this instance
                     stored_urls = current_inst.get("github_urls", [])
                     if stored_urls:
-                        with st.sidebar.expander(f"📂 Stored URLs ({len(stored_urls)})", expanded=False):
+                        with st.sidebar.expander(
+                            f"📂 Stored URLs ({len(stored_urls)})", expanded=False
+                        ):
                             for url in stored_urls:
                                 st.markdown(f"- [{url.split('/')[-1]}]({url})")
             else:
                 st.sidebar.info("No workspaces found")
                 st.session_state.current_instance_id = None
-            
+
             # Create new instance
             with st.sidebar.expander("➕ New Workspace", expanded=False):
                 new_name = st.text_input("Name", key="new_inst_name")
@@ -658,14 +703,14 @@ def main():
                             st.rerun()
                     else:
                         st.warning("Enter a name")
-            
+
             # Delete current instance
             if instances and len(instances) > 1:
                 if st.sidebar.button("🗑️ Delete Current Workspace", type="secondary"):
                     if delete_instance_api(st.session_state.current_instance_id):
                         st.session_state.current_instance_id = None
                         st.rerun()
-            
+
             st.sidebar.divider()
 
         # --- Configuration (Central) ---
@@ -675,7 +720,9 @@ def main():
         st.sidebar.subheader("Preprocessing Options")
         remove_comments = st.sidebar.checkbox("Remove Comments", value=True)
         normalize_whitespace = st.sidebar.checkbox("Normalize Whitespace", value=True)
-        preserve_variable_names = st.sidebar.checkbox("Preserve Variable Names", value=True)
+        preserve_variable_names = st.sidebar.checkbox(
+            "Preserve Variable Names", value=True
+        )
         anonymize_literals = st.sidebar.checkbox("Anonymize Literals", value=True)
 
         # OS junk patterns - always filtered
@@ -691,7 +738,15 @@ def main():
 
         user_ignore_patterns = st.sidebar.multiselect(
             "Ignore Patterns",
-            ["*.xlsx", "*.pdf", "*.git", "__pycache__", "node_modules", "*.pyc", "*.log"],
+            [
+                "*.xlsx",
+                "*.pdf",
+                "*.git",
+                "__pycache__",
+                "node_modules",
+                "*.pyc",
+                "*.log",
+            ],
             default=["*.xlsx", "*.pdf", "*.git", "__pycache__"],
             accept_new_options=True,
         )
@@ -708,7 +763,7 @@ def main():
         st.sidebar.divider()
 
         # --- Footer: User Info & API Status ---
-        
+
         if is_logged_in():
             st.sidebar.header("🔐 Account")
             st.sidebar.success(f"Logged in as: **{st.session_state.username}**")
@@ -719,10 +774,14 @@ def main():
 
         # Success message at bottom
         st.sidebar.success(f"✅ API Connected to {API_BASE_URL}")
-    
+
     # Initialize session state
     if "all_submissions" not in st.session_state:
         st.session_state.all_submissions = {}
+    if "buffer_id" not in st.session_state:
+        st.session_state.buffer_id = None
+    if "filenames" not in st.session_state:
+        st.session_state.filenames = []
     if "preprocessed_embeddings" not in st.session_state:
         st.session_state.preprocessed_embeddings = None
     if "is_preprocessed" not in st.session_state:
@@ -732,7 +791,11 @@ def main():
     st.header("📥 Input Methods")
 
     tab1, tab2, tab3 = st.tabs(
-        ["🔗 URL Analysis (GitHub, PDF, etc.)", "📦 ZIP File Upload", "📄 Individual Files"]
+        [
+            "🔗 URL Analysis (GitHub, PDF, etc.)",
+            "📦 ZIP File Upload",
+            "📄 Individual Files",
+        ]
     )
 
     with tab1:
@@ -741,44 +804,62 @@ def main():
         stored_urls = []
         if current_instance_id:
             instances = fetch_instances()
-            current_inst = next((i for i in instances if i["instance_id"] == current_instance_id), None)
+            current_inst = next(
+                (i for i in instances if i["instance_id"] == current_instance_id), None
+            )
             if current_inst:
                 stored_urls = current_inst.get("github_urls", [])
-        
+
         # Pre-fill text area with stored URLs
         default_urls = "\n".join(stored_urls) if stored_urls else ""
-        
+
         github_urls_text = st.text_area(
             "Enter URLs (GitHub repos, PDF links, direct files):",
             value=default_urls,
             placeholder="https://github.com/user/repo\nhttps://example.com/paper.pdf",
             height=150,
-            key="github_urls_input"
+            key="github_urls_input",
         )
 
         col1, col2 = st.columns(2)
-        
+
         with col1:
-            if st.button("🚀 Run Analysis", key="direct_analysis_github", type="primary", use_container_width=True):
+            if st.button(
+                "🚀 Run Analysis",
+                key="direct_analysis_github",
+                type="primary",
+                use_container_width=True,
+            ):
                 if github_urls_text:
-                    urls = [url.strip() for url in github_urls_text.split("\n") if url.strip()]
-                    
+                    urls = [
+                        url.strip()
+                        for url in github_urls_text.split("\n")
+                        if url.strip()
+                    ]
+
                     # Auto-save URLs
                     if current_instance_id:
                         update_instance_urls_api(current_instance_id, urls)
-                    
+
                     # Process URLs
                     with st.spinner(f"Processing {len(urls)} URLs..."):
-                        st.session_state.all_submissions = process_github_via_api(
-                            urls, ignore_patterns
-                        )
-                    
+                        result_data = process_github_via_api(urls, ignore_patterns)
+                        if result_data:
+                            st.session_state.buffer_id = result_data["buffer_id"]
+                            st.session_state.filenames = result_data["filenames"]
+                            st.session_state.all_submissions = {name: "" for name in result_data["filenames"]}
+                        else:
+                            st.session_state.all_submissions = {}
+
+
                     # Run analysis immediately
                     if st.session_state.all_submissions:
                         with st.spinner("Analyzing all submissions..."):
                             target = next(iter(st.session_state.all_submissions.keys()))
                             result = analyze_direct_via_api(
-                                st.session_state.all_submissions, target, preprocessing_options
+                                st.session_state.all_submissions,
+                                target,
+                                preprocessing_options,
                             )
                         if result:
                             st.session_state.analysis_result = result
@@ -786,23 +867,36 @@ def main():
                         st.error("No submissions extracted")
                 else:
                     st.warning("Please enter at least one URL")
-        
+
         with col2:
-            if st.button("� Process Only", key="process_github", use_container_width=True):
+            if st.button(
+                "� Process Only", key="process_github", use_container_width=True
+            ):
                 if github_urls_text:
-                    urls = [url.strip() for url in github_urls_text.split("\n") if url.strip()]
-                    
+                    urls = [
+                        url.strip()
+                        for url in github_urls_text.split("\n")
+                        if url.strip()
+                    ]
+
                     # Auto-save URLs to current workspace
                     if current_instance_id:
                         update_instance_urls_api(current_instance_id, urls)
-                    
+
                     with st.spinner(f"Processing {len(urls)} URLs..."):
-                        st.session_state.all_submissions = process_github_via_api(
-                            urls, ignore_patterns
-                        )
+                        result_data = process_github_via_api(urls, ignore_patterns)
+                        if result_data:
+                            st.session_state.buffer_id = result_data["buffer_id"]
+                            st.session_state.filenames = result_data["filenames"]
+                            st.session_state.all_submissions = {name: "" for name in result_data["filenames"]}
+                        else:
+                            st.session_state.all_submissions = {}
+
                         st.session_state.is_preprocessed = False
                         st.session_state.preprocessed_embeddings = None
-                    st.success(f"✅ Loaded {len(st.session_state.all_submissions)} submissions")
+                    st.success(
+                        f"✅ Loaded {len(st.session_state.all_submissions)} submissions"
+                    )
                 else:
                     st.warning("Please enter at least one URL")
 
@@ -814,10 +908,14 @@ def main():
         )
 
         if zip_file:
-            with st.spinner("Uploading to API and extracting..."):
-                st.session_state.all_submissions = upload_files_to_api(
-                    [zip_file], ignore_patterns
-                )
+            with st.spinner("Extracting text from ZIP..."):
+                result_data = upload_files_to_api([zip_file], ignore_patterns)
+                if result_data:
+                    st.session_state.buffer_id = result_data["buffer_id"]
+                    st.session_state.filenames = result_data["filenames"]
+                    st.session_state.all_submissions = {name: "" for name in result_data["filenames"]}
+                else:
+                    st.session_state.all_submissions = {}
                 st.session_state.is_preprocessed = False
                 st.session_state.preprocessed_embeddings = None
 
@@ -853,10 +951,14 @@ def main():
         )
 
         if prev_submissions:
-            with st.spinner("Uploading to API..."):
-                st.session_state.all_submissions = upload_individual_to_api(
-                    prev_submissions, ignore_patterns
-                )
+            with st.spinner(f"Processing {len(prev_submissions)} files..."):
+                result_data = upload_individual_to_api(prev_submissions, ignore_patterns)
+                if result_data:
+                    st.session_state.buffer_id = result_data["buffer_id"]
+                    st.session_state.filenames = result_data["filenames"]
+                    st.session_state.all_submissions = {name: "" for name in result_data["filenames"]}
+                else:
+                    st.session_state.all_submissions = {}
                 st.session_state.is_preprocessed = False
                 st.session_state.preprocessed_embeddings = None
             st.success(f"✅ Loaded {len(st.session_state.all_submissions)} submissions")
@@ -867,12 +969,12 @@ def main():
     if all_submissions:
         st.divider()
         st.subheader("🎯 Select Target & Analyze")
-        
+
         file_names = list(all_submissions.keys())
         target_file = st.selectbox(
             "Select target file to compare against others:",
             file_names,
-            key="target_file"
+            key="target_file",
         )
 
         if st.button("🔍 Analyze Selected", use_container_width=True):
@@ -887,19 +989,19 @@ def main():
     if "analysis_result" in st.session_state and st.session_state.analysis_result:
         st.divider()
         display_results(st.session_state.analysis_result)
-        
+
         # ===== Similar Regions Detail View =====
         result = st.session_state.analysis_result
         if result.get("submission_names") and all_submissions:
             st.divider()
             st.subheader("🔬 Detailed Comparison")
             st.caption("View which specific functions/code blocks are similar")
-            
+
             # Find the most similar file
             scores = result.get("scores", {})
             submission_names = result.get("submission_names", [])
             target_file = result.get("target_file", "")
-            
+
             # Calculate average score for each submission
             avg_scores = []
             for i, name in enumerate(submission_names):
@@ -910,43 +1012,49 @@ def main():
                         score_sum += score_values[i]
                         score_count += 1
                 avg_scores.append(score_sum / score_count if score_count > 0 else 0)
-            
+
             # Sort by average score (descending)
             sorted_submissions = sorted(
-                zip(submission_names, avg_scores),
-                key=lambda x: -x[1]
+                zip(submission_names, avg_scores), key=lambda x: -x[1]
             )
-            
+
             # Let user select which file to compare in detail
-            compare_options = [f"{name} ({score:.1%})" for name, score in sorted_submissions]
+            compare_options = [
+                f"{name} ({score:.1%})" for name, score in sorted_submissions
+            ]
             selected_compare = st.selectbox(
                 "Select file to compare with target:",
                 compare_options,
-                key="compare_detail_select"
+                key="compare_detail_select",
             )
-            
+
             # Extract selected file name
-            selected_file = sorted_submissions[compare_options.index(selected_compare)][0]
-            
-            if st.button("🔬 View Similar Regions", use_container_width=True, type="primary"):
+            selected_file = sorted_submissions[compare_options.index(selected_compare)][
+                0
+            ]
+
+            if st.button(
+                "🔬 View Similar Regions", use_container_width=True, type="primary"
+            ):
                 if target_file in all_submissions and selected_file in all_submissions:
                     with st.spinner("Analyzing code regions..."):
                         regions_result = get_similar_regions_via_api(
                             target_file,
-                            all_submissions[target_file],
+                            None, # No content needed if buffer_id is available
                             selected_file,
-                            all_submissions[selected_file]
+                            None,
                         )
                     if regions_result:
                         st.session_state.regions_result = regions_result
                         st.session_state.regions_files = (target_file, selected_file)
                 else:
                     st.error("Cannot find file content for comparison")
-        
+
         # Display similar regions if available
         if "regions_result" in st.session_state and st.session_state.regions_result:
             file1, file2 = st.session_state.get("regions_files", ("File 1", "File 2"))
             display_similar_regions(st.session_state.regions_result, file1, file2)
+
 
 
 if __name__ == "__main__":

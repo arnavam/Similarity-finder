@@ -20,7 +20,7 @@ from auth import (
     delete_instance,
 )
 from auth import router as auth_router
-from code_similarity_finder import FlexibleCodeSimilarityChecker
+from code_similarity_finder import FlexibleCodeSimilarityChecker, get_similar_regions
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -31,6 +31,7 @@ from text_extractor_llamaindex import (
     extract_zip_as_single,
     extract_from_url,
 )
+from submission_buffer import get_buffer
 
 app = FastAPI(
     title="Code Similarity API",
@@ -58,14 +59,16 @@ class GitHubRequest(BaseModel):
 
 
 class AnalyzeRequest(BaseModel):
-    submissions: Dict[str, str]  # filename -> content
+    submissions: Optional[Dict[str, str]] = None  # Full content (deprecated)
+    buffer_id: Optional[str] = None               # Recommended
     target_file: str
     preprocessing_options: Optional[Dict[str, bool]] = None
     mode: str = "direct"  # "direct" or "preprocess"
 
 
 class PreprocessRequest(BaseModel):
-    submissions: Dict[str, str]
+    submissions: Optional[Dict[str, str]] = None
+    buffer_id: Optional[str] = None
     preprocessing_options: Optional[Dict[str, bool]] = None
 
 
@@ -76,8 +79,10 @@ class CompareRequest(BaseModel):
 
 
 class ExtractResponse(BaseModel):
-    submissions: Dict[str, str]
+    buffer_id: str
+    filenames: List[str]
     count: int
+    submissions: Optional[Dict[str, str]] = None  # Deprecated
 
 
 class AnalyzeResponse(BaseModel):
@@ -94,10 +99,11 @@ class PreprocessResponse(BaseModel):
 
 class SimilarRegionsRequest(BaseModel):
     """Request to get detailed similar regions between two files."""
+    buffer_id: Optional[str] = None
     file1_name: str
-    file1_content: str
+    file1_content: Optional[str] = None
     file2_name: str
-    file2_content: str
+    file2_content: Optional[str] = None
     block_threshold: float = 0.6  # Minimum similarity for function/class matches
     min_tokens: int = 10  # Minimum tokens for sequence matches
 
@@ -111,8 +117,8 @@ async def root():
     return {"status": "ok", "service": "Code Similarity API", "version": "2.0.0"}
 
 
-@app.post("/upload", response_model=ExtractResponse)
-async def upload_files(
+@app.post("/extract/upload", response_model=ExtractResponse)
+async def extract_text_from_upload(
     files: List[UploadFile] = File(...),
     ignore_patterns: Optional[str] = None,
     user: dict = Depends(require_auth),
@@ -138,11 +144,20 @@ async def upload_files(
             if text.strip():
                 all_submissions[file.filename] = text
 
-    return ExtractResponse(submissions=all_submissions, count=len(all_submissions))
+    buffer = get_buffer()
+    buffer_id = buffer.save_submissions(all_submissions)
+
+    return ExtractResponse(
+        buffer_id=buffer_id,
+        filenames=list(all_submissions.keys()),
+        count=len(all_submissions),
+        submissions={}
+    )
 
 
-@app.post("/github", response_model=ExtractResponse)
-async def process_github(request: GitHubRequest, user: dict = Depends(require_auth)):
+
+@app.post("/extract/urls", response_model=ExtractResponse)
+async def extract_text_from_urls(request: GitHubRequest, user: dict = Depends(require_auth)):
     """Process URLs (GitHub repos or direct files) and extract text."""
     all_submissions = {}
 
@@ -160,7 +175,15 @@ async def process_github(request: GitHubRequest, user: dict = Depends(require_au
     if request.urls:
         save_github_urls(user["username"], request.urls)
 
-    return ExtractResponse(submissions=all_submissions, count=len(all_submissions))
+    buffer = get_buffer()
+    buffer_id = buffer.save_submissions(all_submissions)
+
+    return ExtractResponse(
+        buffer_id=buffer_id,
+        filenames=list(all_submissions.keys()),
+        count=len(all_submissions),
+        submissions={}
+    )
 
 
 @app.get("/github-history")
@@ -255,8 +278,23 @@ async def analyze_similarity(
 
     checker = FlexibleCodeSimilarityChecker(preprocessing_options=options)
 
+    # Resolve submissions: either from request or from buffer
+    submissions = request.submissions
+    if request.buffer_id:
+        buffer = get_buffer()
+        submissions = buffer.get_submissions(request.buffer_id)
+    
+    if not submissions:
+        raise HTTPException(status_code=400, detail="No submissions provided or buffer expired")
+    
+    if request.target_file not in submissions:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Target file '{request.target_file}' not found",
+        )
+
     # Use direct mode - parallel process + compare + discard
-    result = checker.analyze_direct(request.target_file, request.submissions)
+    result = checker.analyze_direct(request.target_file, submissions)
 
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
@@ -285,7 +323,22 @@ async def preprocess_submissions(
     }
 
     checker = FlexibleCodeSimilarityChecker(preprocessing_options=options)
-    embeddings = checker.preprocess_all(request.submissions)
+    
+    submissions = request.submissions
+    if request.buffer_id:
+        buffer = get_buffer()
+        submissions = buffer.get_submissions(request.buffer_id)
+        
+    if not submissions:
+        raise HTTPException(status_code=400, detail="No submissions provided or buffer expired")
+
+    embeddings = checker.preprocess_all(submissions)
+    
+    # Save back to buffer if available for fast /compare later
+    if request.buffer_id:
+        buffer = get_buffer()
+        for name, emb_data in embeddings.items():
+            buffer.save_preprocessed(request.buffer_id, name, emb_data)
 
     return PreprocessResponse(
         embeddings=embeddings, count=len(embeddings), names=list(embeddings.keys())
@@ -358,7 +411,16 @@ async def upload_individual_files(
             if text.strip():
                 all_submissions[file.filename] = text
 
-    return ExtractResponse(submissions=all_submissions, count=len(all_submissions))
+    buffer = get_buffer()
+    buffer_id = buffer.save_submissions(all_submissions)
+
+    return ExtractResponse(
+        buffer_id=buffer_id,
+        filenames=list(all_submissions.keys()),
+        count=len(all_submissions),
+        submissions={}
+    )
+
 
 
 @app.post("/similar-regions")
@@ -375,11 +437,22 @@ async def get_similar_regions(
     - overall_similarity: Overall Levenshtein similarity
     - stats: Analysis statistics
     """
-    checker = FlexibleCodeSimilarityChecker()
     
-    result = checker.get_similar_regions(
-        code1=request.file1_content,
-        code2=request.file2_content,
+    code1 = request.file1_content
+    code2 = request.file2_content
+
+    if request.buffer_id:
+        buffer = get_buffer()
+        submissions = buffer.get_submissions(request.buffer_id)
+        code1 = submissions.get(request.file1_name, code1)
+        code2 = submissions.get(request.file2_name, code2)
+
+    if not code1 or not code2:
+        raise HTTPException(status_code=400, detail="Cannot find file content for comparison")
+
+    result = get_similar_regions(
+        code1=code1,
+        code2=code2,
         block_threshold=request.block_threshold,
         min_tokens=request.min_tokens,
     )
