@@ -576,6 +576,7 @@ def main():
     st.markdown("Compare new submissions against batch uploads of previous submissions")
 
     # ===== Sidebar Logic =====
+    ignore_patterns = None
 
     # 1. Check API Connection (Top)
     api_connected = False
