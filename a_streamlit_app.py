@@ -116,7 +116,7 @@ def upload_files_to_api(files, ignore_patterns=None):
             headers=get_auth_headers(),
         )
         response.raise_for_status()
-        return response.json()["submissions"]
+        return response.json()
     except requests.exceptions.HTTPError as e:
         if e.response.status_code == 401:
             st.error("Session expired. Please login again.")
@@ -142,7 +142,7 @@ def process_github_via_api(urls, ignore_patterns=None):
             headers=get_auth_headers(),
         )
         response.raise_for_status()
-        return response.json()["submissions"]
+        return response.json()
     except requests.exceptions.HTTPError as e:
         if e.response.status_code == 401:
             st.error("Session expired. Please login again.")
@@ -355,7 +355,7 @@ def upload_individual_to_api(files, ignore_patterns=None):
             headers=get_auth_headers(),
         )
         response.raise_for_status()
-        return response.json()["submissions"]
+        return response.json()
     except requests.exceptions.HTTPError as e:
         if e.response.status_code == 401:
             st.error("Session expired. Please login again.")
@@ -575,7 +575,6 @@ def main():
     st.title("🔍 Copyadi Checker")
     st.markdown("Compare new submissions against batch uploads of previous submissions")
 
-    # ===== Sidebar Logic =====
     ignore_patterns = None
 
     # 1. Check API Connection (Top)
@@ -686,7 +685,7 @@ def main():
                             f"📂 Stored URLs ({len(stored_urls)})", expanded=False
                         ):
                             for url in stored_urls:
-                                st.markdown(f"- [{url.split('/')[-1]}]({url})")
+                                st.markdown(f"[{url.split('/')[-1]}]({url})")
             else:
                 st.sidebar.info("No workspaces found")
                 st.session_state.current_instance_id = None

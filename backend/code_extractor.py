@@ -321,7 +321,7 @@ def extract_from_github(
 ) -> Dict[str, str]:
     """
     Clone a GitHub repository and extract text from all files.
-
+    
     Args:
         url: GitHub repository URL
         ignore_patterns: Patterns to skip
