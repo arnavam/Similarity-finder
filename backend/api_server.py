@@ -24,8 +24,7 @@ from code_similarity_finder import FlexibleCodeSimilarityChecker, get_similar_re
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from text_extractor_llamaindex import (
-    extract_from_github,
+from code_extractor import (
     extract_from_zip,
     extract_text,
     extract_zip_as_single,
