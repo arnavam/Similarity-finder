@@ -2,7 +2,7 @@
 
 llama-index-embeddings-huggingface
 llama-index-vector-stores-pinecone
-pinecone-client
+pinecone
 
 
 # NLP - spaCy (smaller model)
