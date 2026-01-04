@@ -10,6 +10,17 @@ Two modes:
 import requests
 import streamlit as st
 from collections import Counter
+from streamlit_cookies_manager import EncryptedCookieManager
+
+# Initialize cookies (must be at top, before any st calls)
+try:
+    cookie_password = st.secrets["COOKIE_PASSWORD"]
+except:
+    cookie_password = "dev-secret-key-change-in-prod"
+
+cookies = EncryptedCookieManager(prefix="copyadi_", password=cookie_password)
+if not cookies.ready():
+    st.stop()
 
 # API endpoint - tries localhost first, falls back to remote
 try:
@@ -54,6 +65,10 @@ def login_user(username: str, password: str) -> bool:
             data = response.json()
             st.session_state.auth_token = data["access_token"]
             st.session_state.username = data["username"]
+            # Save to cookies for auto-login
+            cookies["auth_token"] = data["access_token"]
+            cookies["username"] = data["username"]
+            cookies.save()
             return True
         else:
             st.error(response.json().get("detail", "Login failed"))
@@ -94,17 +109,67 @@ def register_user(username: str, password: str, invite_code: str = None) -> bool
 
 
 def logout_user():
-    """Clear auth state."""
+    """Clear auth state and cookies."""
     st.session_state.auth_token = None
     st.session_state.username = None
+    # Clear cookies
+    cookies["auth_token"] = ""
+    cookies["username"] = ""
+    cookies.save()
 
 
 def is_logged_in() -> bool:
-    """Check if user is logged in."""
-    return st.session_state.get("auth_token") is not None
+    """Check if user is logged in (session or cookie)."""
+    # Try session state first
+    if st.session_state.get("auth_token"):
+        return True
+    # Try loading from cookies
+    if cookies.get("auth_token"):
+        st.session_state.auth_token = cookies["auth_token"]
+        st.session_state.username = cookies.get("username", "")
+        return True
+    return False
 
 
 # ===== API Functions =====
+
+
+def analyze_via_api(submissions, target_file, preprocessing_options, mode="fast", instance_id=None):
+    """
+    Unified analysis API. Modes: 'fast', 'full', 'hybrid'.
+    """
+    if not is_logged_in():
+        st.error("Please login first")
+        return None
+
+    try:
+        payload = {
+            "submissions": submissions if not st.session_state.get("buffer_id") else None,
+            "buffer_id": st.session_state.get("buffer_id"),
+            "target_file": target_file,
+            "preprocessing_options": preprocessing_options,
+            "mode": mode,
+        }
+        if mode == "hybrid" and instance_id:
+            payload["instance_id"] = instance_id
+
+        response = requests.post(
+            f"{API_BASE_URL}/analyze",
+            json=payload,
+            headers=get_auth_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 401:
+            st.error("Session expired. Please login again.")
+            logout_user()
+        else:
+            st.error(f"API Error: {e}")
+        return None
+    except Exception as e:
+        st.error(f"API Error: {e}")
+        return None
 
 
 def get_auth_headers() -> dict:
@@ -713,9 +778,9 @@ def main():
         analysis_mode = st.sidebar.selectbox(
             "🔬 Analysis Mode",
             options=["fast", "full", "hybrid"],
-            format_func=lambda x: {"simple": "⚡ Simple", "full": "📊 Full", "hybrid": "🧠 llm"}[x],
+            format_func=lambda x: {"fast": "⚡ Simple ", "full": "📊 TF-IDF", "hybrid": "🧠 LLM"}[x],
             index=0,
-            help="Fast: Quick AST comparison | Full: +TF-IDF cosine | Hybrid: AI embeddings + pruning"
+            help="Simple: Quick AST comparison | TF-IDF: +TF-IDF cosine | LLM: AI embeddings + pruning"
         )
 
         # OS junk patterns - always filtered

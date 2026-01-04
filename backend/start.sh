@@ -7,4 +7,4 @@ PORT=${PORT:-7860}
 
 echo "Starting API server on port $PORT..."
 # We are already in /app
-exec uvicorn api_server:app --host 0.0.0.0 --port $PORT --access-log
+exec uvicorn api_server:app --host 0.0.0.0 --port $PORT --workers 2 --access-log
