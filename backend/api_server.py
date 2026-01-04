@@ -33,6 +33,7 @@ from code_similarity_finder import (
     preprocess_all,
 )
 from code_region_similarity_finder import get_similar_regions
+
 from fastapi import Body, Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -236,9 +237,7 @@ async def get_instance_details(instance_id: str, user: dict = Depends(require_au
                     # SAVE the merged URLs to database
                     update_instance_urls(instance_id, user["username"], merged)
                     print(
-                        f"💾 Saved {len(merged)} URLs to instance {
-                            instance.get('name', instance_id)
-                        }"
+                        f"💾 Saved {len(merged)} URLs to instance {instance.get('name', instance_id)}"
                     )
         except Exception as e:
             print(f"⚠️ Discord auto-load failed: {e}")
