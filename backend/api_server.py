@@ -28,6 +28,7 @@ from code_extractor import (
 )
 from code_similarity_finder import (
     analyze_direct,
+    analyze_full,
     analyze_hybrid,
     compare_preprocessed as compare_preprocessed_fn,
     preprocess_all,
@@ -308,21 +309,25 @@ async def analyze_similarity(
         )
 
     # Modes:
-    # 1. Hybrid: Vector Search -> Prune -> Direct Analysis (Fastest for large sets)
-    # 2. Direct: Full AST comparison on all files (Strict, slower)
+    # 1. fast/direct: Fast AST comparison, skips TF-IDF cosine (memory efficient)
+    # 2. full: Full analysis with TF-IDF cosine similarity (all scoring methods)
+    # 3. hybrid: Vector Search -> Prune -> Direct Analysis (fastest for large sets)
 
     result = {}
 
     if request.mode == "hybrid":
         if not request.instance_id:
-            # Fallback if no instance_id provided (or error out)
+            # Fallback if no instance_id provided
             result = analyze_direct(request.target_file, submissions, options)
         else:
             result = analyze_hybrid(
                 request.target_file, submissions, namespace=request.instance_id, options=options
             )
+    elif request.mode == "full":
+        # Full analysis with TF-IDF cosine similarity
+        result = analyze_full(request.target_file, submissions, options)
     else:
-        # Default direct mode
+        # Default: fast/direct mode
         result = analyze_direct(request.target_file, submissions, options)
 
     if "error" in result:

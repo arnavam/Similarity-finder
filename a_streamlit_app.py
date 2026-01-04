@@ -283,132 +283,6 @@ def delete_instance_api(instance_id):
     except:
         return False
 
-
-def analyze_direct_via_api(submissions, target_file, preprocessing_options):
-    """Direct analysis: parallel process+compare+discard (memory efficient)."""
-    if not is_logged_in():
-        st.error("Please login first")
-        return None
-
-    try:
-        response = requests.post(
-            f"{API_BASE_URL}/analyze",
-            json={
-                "submissions": submissions if not st.session_state.get("buffer_id") else None,
-                "buffer_id": st.session_state.get("buffer_id"),
-                "target_file": target_file,
-                "preprocessing_options": preprocessing_options,
-                "mode": "direct",
-            },
-            headers=get_auth_headers(),
-        )
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.HTTPError as e:
-        if e.response.status_code == 401:
-            st.error("Session expired. Please login again.")
-            logout_user()
-        else:
-            st.error(f"API Error: {e}")
-        return None
-    except Exception as e:
-        st.error(f"API Error: {e}")
-        return None
-
-
-def analyze_hybrid_via_api(submissions, target_file, preprocessing_options, instance_id):
-    """Hybrid analysis: Vector Search -> Prune -> Direct (uses LLM embeddings)."""
-    if not is_logged_in():
-        st.error("Please login first")
-        return None
-
-    try:
-        response = requests.post(
-            f"{API_BASE_URL}/analyze",
-            json={
-                "submissions": submissions if not st.session_state.get("buffer_id") else None,
-                "buffer_id": st.session_state.get("buffer_id"),
-                "target_file": target_file,
-                "preprocessing_options": preprocessing_options,
-                "mode": "hybrid",
-                "instance_id": instance_id,
-            },
-            headers=get_auth_headers(),
-        )
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.HTTPError as e:
-        if e.response.status_code == 401:
-            st.error("Session expired. Please login again.")
-            logout_user()
-        else:
-            st.error(f"API Error: {e}")
-        return None
-    except Exception as e:
-        st.error(f"API Error: {e}")
-        return None
-
-
-def preprocess_via_api(submissions, preprocessing_options):
-    """Preprocess all submissions and return embeddings."""
-    if not is_logged_in():
-        st.error("Please login first")
-        return None
-
-    try:
-        response = requests.post(
-            f"{API_BASE_URL}/preprocess",
-            json={
-                "submissions": submissions if not st.session_state.get("buffer_id") else None,
-                "buffer_id": st.session_state.get("buffer_id"),
-                "preprocessing_options": preprocessing_options,
-            },
-            headers=get_auth_headers(),
-        )
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.HTTPError as e:
-        if e.response.status_code == 401:
-            st.error("Session expired. Please login again.")
-            logout_user()
-        else:
-            st.error(f"API Error: {e}")
-        return None
-    except Exception as e:
-        st.error(f"API Error: {e}")
-        return None
-
-
-def compare_via_api(embeddings, target_file, preprocessing_options):
-    """Compare target against preprocessed embeddings."""
-    if not is_logged_in():
-        st.error("Please login first")
-        return None
-
-    try:
-        response = requests.post(
-            f"{API_BASE_URL}/compare",
-            json={
-                "embeddings": embeddings,
-                "target_file": target_file,
-                "preprocessing_options": preprocessing_options,
-            },
-            headers=get_auth_headers(),
-        )
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.HTTPError as e:
-        if e.response.status_code == 401:
-            st.error("Session expired. Please login again.")
-            logout_user()
-        else:
-            st.error(f"API Error: {e}")
-        return None
-    except Exception as e:
-        st.error(f"API Error: {e}")
-        return None
-
-
 def upload_individual_to_api(files, ignore_patterns=None):
     """Upload files where each file/ZIP = ONE submission."""
     if not is_logged_in():
@@ -835,12 +709,13 @@ def main():
         )
         anonymize_literals = st.sidebar.checkbox("Anonymize Literals", value=True)
         
-        # LLM Mode Toggle
-        st.sidebar.subheader("Analysis Mode")
-        use_llm = st.sidebar.toggle(
-            "🧠 Use LLM Embeddings", 
-            value=False,
-            help="Uses AI embeddings for faster search on large datasets. Requires Pinecone API key."
+        # Analysis Mode Selector
+        analysis_mode = st.sidebar.selectbox(
+            "🔬 Analysis Mode",
+            options=["fast", "full", "hybrid"],
+            format_func=lambda x: {"simple": "⚡ Simple", "full": "📊 Full", "hybrid": "🧠 llm"}[x],
+            index=0,
+            help="Fast: Quick AST comparison | Full: +TF-IDF cosine | Hybrid: AI embeddings + pruning"
         )
 
         # OS junk patterns - always filtered
@@ -984,18 +859,12 @@ def main():
                     if st.session_state.all_submissions:
                         with st.spinner("Analyzing all submissions..."):
                             target = next(iter(st.session_state.all_submissions.keys()))
-                            if use_llm and st.session_state.get("current_instance_id"):
-                                result = analyze_hybrid_via_api(
+                            result = analyze_via_api(
                                     st.session_state.all_submissions,
                                     target,
                                     preprocessing_options,
-                                    st.session_state.current_instance_id,
-                                )
-                            else:
-                                result = analyze_direct_via_api(
-                                    st.session_state.all_submissions,
-                                    target,
-                                    preprocessing_options,
+                                    mode=analysis_mode,
+                                    instance_id=st.session_state.get("current_instance_id"),
                                 )
                         if result:
                             st.session_state.analysis_result = result
@@ -1115,15 +984,11 @@ def main():
 
         if st.button("🔍 Analyze Selected", use_container_width=True):
             with st.spinner("Analyzing all submissions..."):
-                if use_llm and st.session_state.get("current_instance_id"):
-                    result = analyze_hybrid_via_api(
-                        all_submissions, target_file, preprocessing_options,
-                        st.session_state.current_instance_id
-                    )
-                else:
-                    result = analyze_direct_via_api(
-                        all_submissions, target_file, preprocessing_options
-                    )
+                result = analyze_via_api(
+                    all_submissions, target_file, preprocessing_options,
+                    mode=analysis_mode,
+                    instance_id=st.session_state.get("current_instance_id")
+                )
             if result:
                 st.session_state.analysis_result = result
 
