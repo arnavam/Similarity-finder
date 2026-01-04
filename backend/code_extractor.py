@@ -262,6 +262,7 @@ def extract_from_url(
     """
     Extract text from a URL.
     - If GitHub repo URL: Clones and extracts all files (one submission).
+    - If GitHub blob URL: Converts to raw URL and downloads the file.
     - If direct file URL (PDF, TXT, etc.): Downloads and extracts (one submission).
 
     Args:
@@ -271,12 +272,19 @@ def extract_from_url(
     Returns:
         Dict mapping submission name to content
     """
-    # Check if it's a GitHub repo URL
-    # Exclude raw file URLs or blob views which are single files
+    # Convert GitHub blob URLs to raw URLs
+    # e.g., https://github.com/user/repo/blob/main/file.py
+    #    -> https://raw.githubusercontent.com/user/repo/main/file.py
+    if "github.com" in url and "/blob/" in url:
+        url = url.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
+    
+    # Check if it's a GitHub repo URL (not a file URL)
+    # Exclude raw file URLs which are direct file downloads
     is_github_repo = (
         "github.com" in url
         and "raw.githubusercontent.com" not in url
         and "/blob/" not in url
+        and "/tree/" not in url  # Also exclude tree views
     )
 
     if is_github_repo:
@@ -285,7 +293,11 @@ def extract_from_url(
     # Otherwise treat as a single file download
     submissions = {}
     try:
-        response = requests.get(url, timeout=30, stream=True)
+        # Add User-Agent to avoid GitHub blocking requests
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }
+        response = requests.get(url, timeout=30, stream=True, headers=headers)
         response.raise_for_status()
 
         # Determine filename

@@ -1,0 +1,15 @@
+services:
+  copyadi:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: copyadi
+    container_name: copyadi-backend
+    ports:
+      - "7860:7860"
+    volumes:
+      # Mount source code for hot-reload during development
+      - ./backend:/app
+    env_file:
+      - ./backend/.env
+    restart: unless-stopped

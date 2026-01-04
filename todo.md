@@ -1,10 +1,13 @@
+- read the whole code to find the redundant parts
+
 ## features:
+- add urls history only if there is update in existing ones
+- proper display error ( mainly if urls cant be processed )
 - vector database & llm ( local and api )
-- pdf report
 - urls history frontend
-- image , vedio
+- image , video
 - find edge cases
-- 
+
 
 ## redundant:
 - empty submission dict on api call
@@ -13,3 +16,7 @@
 - names such as macox is used to find top folder
 - duplicate function usage ?
 
+
+# optional features
+- directly send the code to compare / embedding etc.. to server rather than buffer id
+- @lru_cache for preprocessing

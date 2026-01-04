@@ -9,16 +9,38 @@ Two modes:
 
 import requests
 import streamlit as st
+from collections import Counter
 
 # API endpoint - tries localhost first, falls back to remote
 try:
-    requests.get("http://localhost:8000/", timeout=1)
-    API_BASE_URL = "http://localhost:8000"
+    requests.get("http://localhost:7860/", timeout=1)
+    API_BASE_URL = "http://localhost:7860"
 except:
     API_BASE_URL = "https://arnavam-copyadi-finder.hf.space"
 
 
 # ===== Auth Helper Functions =====
+
+
+def calculate_overall_match(score_values):
+    """
+    Calculate overall score using Mode/Max logic:
+    - If max frequency == 1 (all unique): take max score
+    - If mode exists: take highest mode
+    """
+    if not score_values:
+        return 0
+        
+    counts = Counter(score_values)
+    max_freq = max(counts.values())
+    
+    if max_freq == 1:
+        # All unique -> take highest score
+        return max(score_values)
+    else:
+        # Mode exists -> take highest mode (in case of tie)
+        modes = [k for k, v in counts.items() if v == max_freq]
+        return max(modes)
 
 
 def login_user(username: str, password: str) -> bool:
@@ -173,8 +195,26 @@ def fetch_github_history(instance_id=None):
         return []
 
 
+def fetch_instance_details(instance_id):
+    """Fetch single instance details - this triggers Discord URL scraping."""
+    if not is_logged_in():
+        return None
+
+    try:
+        response = requests.get(
+            f"{API_BASE_URL}/instances/{instance_id}",
+            headers=get_auth_headers(),
+            timeout=30,  # Discord scraping may take time
+        )
+        response.raise_for_status()
+        return response.json().get("instance")
+    except Exception as e:
+        print(f"Error fetching instance details: {e}")
+        return None
+
+
 def fetch_instances():
-    """Fetch user's instances from API."""
+    """Fetch user's instances from API (basic list, no Discord scraping)."""
     if not is_logged_in():
         return []
 
@@ -189,15 +229,19 @@ def fetch_instances():
         return []
 
 
-def create_new_instance(name, description=""):
-    """Create a new instance via API."""
+def create_new_instance(name, description="", discord_channel_id=None):
+    """Create a new instance via API. Optionally link to Discord channel."""
     if not is_logged_in():
         return None
 
     try:
+        params = {"name": name, "description": description}
+        if discord_channel_id:
+            params["discord_channel_id"] = discord_channel_id
+        
         response = requests.post(
             f"{API_BASE_URL}/instances",
-            params={"name": name, "description": description},
+            params=params,
             headers=get_auth_headers(),
         )
         response.raise_for_status()
@@ -255,6 +299,39 @@ def analyze_direct_via_api(submissions, target_file, preprocessing_options):
                 "target_file": target_file,
                 "preprocessing_options": preprocessing_options,
                 "mode": "direct",
+            },
+            headers=get_auth_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 401:
+            st.error("Session expired. Please login again.")
+            logout_user()
+        else:
+            st.error(f"API Error: {e}")
+        return None
+    except Exception as e:
+        st.error(f"API Error: {e}")
+        return None
+
+
+def analyze_hybrid_via_api(submissions, target_file, preprocessing_options, instance_id):
+    """Hybrid analysis: Vector Search -> Prune -> Direct (uses LLM embeddings)."""
+    if not is_logged_in():
+        st.error("Please login first")
+        return None
+
+    try:
+        response = requests.post(
+            f"{API_BASE_URL}/analyze",
+            json={
+                "submissions": submissions if not st.session_state.get("buffer_id") else None,
+                "buffer_id": st.session_state.get("buffer_id"),
+                "target_file": target_file,
+                "preprocessing_options": preprocessing_options,
+                "mode": "hybrid",
+                "instance_id": instance_id,
             },
             headers=get_auth_headers(),
         )
@@ -426,9 +503,19 @@ def display_results(result):
                 row[clean_cat] = val
                 total_score += val
                 count += 1
+                
+                # Collect values for mode/max calculation
+                if "score_values" not in row:
+                    row["score_values"] = []
+                row["score_values"].append(val)
 
-        # Calculate average/overall score
-        row["Overall Match"] = total_score / count if count > 0 else 0
+        # Calculate overall score using shared helper
+        row["Overall Match"] = calculate_overall_match(row.get("score_values", []))
+        
+        # Cleanup temp list
+        if "score_values" in row:
+            del row["score_values"]
+
         data.append(row)
 
     # Sort by Overall Match
@@ -686,17 +773,40 @@ def main():
                         ):
                             for url in stored_urls:
                                 st.markdown(f"[{url.split('/')[-1]}]({url})")
+                    
+                    # Add Discord sync button if workspace has Discord channel
+                    if current_inst.get("discord_channel_id"):
+                        if st.sidebar.button("🔄 Sync Discord URLs", key="sync_discord_btn"):
+                            with st.spinner("Fetching URLs from Discord..."):
+                                details = fetch_instance_details(current_inst["instance_id"])
+                                if details and details.get("github_urls"):
+                                    # Update session state so URLs appear in text area
+                                    st.session_state.github_urls_input = "\n".join(details["github_urls"])
+                                    st.sidebar.success(f"✅ Loaded {len(details['github_urls'])} URLs!")
+                                    st.rerun()
+                                else:
+                                    st.sidebar.warning("No URLs found with matching tag")
             else:
                 st.sidebar.info("No workspaces found")
                 st.session_state.current_instance_id = None
 
             # Create new instance
             with st.sidebar.expander("➕ New Workspace", expanded=False):
-                new_name = st.text_input("Name", key="new_inst_name")
+                new_name = st.text_input("Name", key="new_inst_name",
+                    help="Use Discord #tag name (e.g., 'nlp-classification')")
                 new_desc = st.text_input("Description", key="new_inst_desc")
+                discord_channel = st.text_input(
+                    "Discord Channel ID (optional)", 
+                    key="discord_channel_id",
+                    help="If set, URLs will be auto-loaded from Discord #tag"
+                )
                 if st.button("Create", key="create_inst_btn"):
                     if new_name:
-                        result = create_new_instance(new_name, new_desc)
+                        result = create_new_instance(
+                            new_name, 
+                            new_desc, 
+                            discord_channel if discord_channel else None
+                        )
                         if result:
                             st.success(f"Created: {new_name}")
                             st.session_state.current_instance_id = result["instance_id"]
@@ -724,6 +834,14 @@ def main():
             "Preserve Variable Names", value=True
         )
         anonymize_literals = st.sidebar.checkbox("Anonymize Literals", value=True)
+        
+        # LLM Mode Toggle
+        st.sidebar.subheader("Analysis Mode")
+        use_llm = st.sidebar.toggle(
+            "🧠 Use LLM Embeddings", 
+            value=False,
+            help="Uses AI embeddings for faster search on large datasets. Requires Pinecone API key."
+        )
 
         # OS junk patterns - always filtered
         OS_JUNK_PATTERNS = [
@@ -810,12 +928,22 @@ def main():
             if current_inst:
                 stored_urls = current_inst.get("github_urls", [])
 
-        # Pre-fill text area with stored URLs
-        default_urls = "\n".join(stored_urls) if stored_urls else ""
+        # Initialize session state for URL input if not set
+        if "github_urls_input" not in st.session_state:
+            st.session_state.github_urls_input = "\n".join(stored_urls) if stored_urls else ""
+
+        # Add Load from Workspace button
+        if st.button("📥 Load from Workspace", key="load_workspace_urls", use_container_width=False):
+            if current_instance_id and stored_urls:
+                st.session_state.github_urls_input = "\n".join(stored_urls)
+                st.rerun()
+            elif not current_instance_id:
+                st.warning("No workspace selected")
+            else:
+                st.info("No URLs stored in current workspace")
 
         github_urls_text = st.text_area(
             "Enter URLs (GitHub repos, PDF links, direct files):",
-            value=default_urls,
             placeholder="https://github.com/user/repo\nhttps://example.com/paper.pdf",
             height=150,
             key="github_urls_input",
@@ -837,8 +965,8 @@ def main():
                         if url.strip()
                     ]
 
-                    # Auto-save URLs
-                    if current_instance_id:
+                    # Auto-save URLs only if changed
+                    if current_instance_id and sorted(urls) != sorted(stored_urls):
                         update_instance_urls_api(current_instance_id, urls)
 
                     # Process URLs
@@ -856,11 +984,19 @@ def main():
                     if st.session_state.all_submissions:
                         with st.spinner("Analyzing all submissions..."):
                             target = next(iter(st.session_state.all_submissions.keys()))
-                            result = analyze_direct_via_api(
-                                st.session_state.all_submissions,
-                                target,
-                                preprocessing_options,
-                            )
+                            if use_llm and st.session_state.get("current_instance_id"):
+                                result = analyze_hybrid_via_api(
+                                    st.session_state.all_submissions,
+                                    target,
+                                    preprocessing_options,
+                                    st.session_state.current_instance_id,
+                                )
+                            else:
+                                result = analyze_direct_via_api(
+                                    st.session_state.all_submissions,
+                                    target,
+                                    preprocessing_options,
+                                )
                         if result:
                             st.session_state.analysis_result = result
                     else:
@@ -879,8 +1015,8 @@ def main():
                         if url.strip()
                     ]
 
-                    # Auto-save URLs to current workspace
-                    if current_instance_id:
+                    # Auto-save URLs to current workspace only if changed
+                    if current_instance_id and sorted(urls) != sorted(stored_urls):
                         update_instance_urls_api(current_instance_id, urls)
 
                     with st.spinner(f"Processing {len(urls)} URLs..."):
@@ -979,9 +1115,15 @@ def main():
 
         if st.button("🔍 Analyze Selected", use_container_width=True):
             with st.spinner("Analyzing all submissions..."):
-                result = analyze_direct_via_api(
-                    all_submissions, target_file, preprocessing_options
-                )
+                if use_llm and st.session_state.get("current_instance_id"):
+                    result = analyze_hybrid_via_api(
+                        all_submissions, target_file, preprocessing_options,
+                        st.session_state.current_instance_id
+                    )
+                else:
+                    result = analyze_direct_via_api(
+                        all_submissions, target_file, preprocessing_options
+                    )
             if result:
                 st.session_state.analysis_result = result
 
@@ -1002,20 +1144,19 @@ def main():
             submission_names = result.get("submission_names", [])
             target_file = result.get("target_file", "")
 
-            # Calculate average score for each submission
-            avg_scores = []
+            # Calculate overall score for each submission using Mode/Max logic
+            final_scores = []
             for i, name in enumerate(submission_names):
-                score_sum = 0
-                score_count = 0
-                for score_type, score_values in scores.items():
-                    if score_values and i < len(score_values):
-                        score_sum += score_values[i]
-                        score_count += 1
-                avg_scores.append(score_sum / score_count if score_count > 0 else 0)
+                score_values = []
+                for score_type, values in scores.items():
+                    if values and i < len(values):
+                        score_values.append(values[i])
+                
+                final_scores.append(calculate_overall_match(score_values))
 
-            # Sort by average score (descending)
+            # Sort by score (descending)
             sorted_submissions = sorted(
-                zip(submission_names, avg_scores), key=lambda x: -x[1]
+                zip(submission_names, final_scores), key=lambda x: -x[1]
             )
 
             # Let user select which file to compare in detail
