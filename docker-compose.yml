@@ -3,7 +3,6 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    image: copyadi
     container_name: copyadi-backend
     ports:
       - "7860:7860"

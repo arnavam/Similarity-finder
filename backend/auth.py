@@ -13,6 +13,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 from pydantic import BaseModel
 from pymongo import MongoClient
+from pymongo.errors import DuplicateKeyError
 
 # ===== Configuration =====
 
@@ -48,16 +49,34 @@ def get_users_collection():
     return _users_collection
 
 
+_github_history_collection = None
+
+
 def get_github_history_collection():
     """Get MongoDB collection for GitHub URL history."""
-    global _client, _db
+    global _client, _db, _github_history_collection
+    if _github_history_collection is not None:
+        return _github_history_collection
+
     if _db is None:
         get_users_collection()  # Initialize connection
-    return _db["github_history"]
+
+    collection = _db["github_history"]
+
+    # Try to create index, but don't fail if it exists or has conflicts
+    try:
+        collection.create_index(
+            [("username", 1), ("instance_id", 1), ("created_at", -1)], background=True
+        )
+    except Exception as e:
+        print(f"⚠️ Index creation skipped (may already exist): {e}")
+
+    _github_history_collection = collection
+    return collection
 
 
 def save_github_urls(username: str, urls: List[str], instance_id: str = None):
-    """Save GitHub URLs to user's history (optionally tied to an instance)."""
+    """Save GitHub URLs to user's history (optionally tied to an instance). Duplicates are silently ignored."""
     collection = get_github_history_collection()
     doc = {
         "username": username,
@@ -65,7 +84,10 @@ def save_github_urls(username: str, urls: List[str], instance_id: str = None):
         "instance_id": instance_id,
         "created_at": datetime.utcnow().isoformat(),
     }
-    collection.insert_one(doc)
+    try:
+        collection.insert_one(doc)
+    except DuplicateKeyError:
+        pass  # Already exists, silently ignore
 
 
 def get_user_github_history(username: str, instance_id: str = None) -> List[dict]:
@@ -76,10 +98,17 @@ def get_user_github_history(username: str, instance_id: str = None) -> List[dict
         query["instance_id"] = instance_id
     history = list(
         collection.find(
-            query, {"_id": 4, "urls": 1, "created_at": 1, "instance_id": 1}
-        ).sort("created_at", 3)
+            query, {"_id": 0, "urls": 1, "created_at": 1, "instance_id": 1}
+        ).sort("created_at", -1)
     )
     return history
+
+
+def delete_github_history_entry(username: str, created_at: str) -> bool:
+    """Delete a specific history entry for a user."""
+    collection = get_github_history_collection()
+    result = collection.delete_one({"username": username, "created_at": created_at})
+    return result.deleted_count > 0
 
 
 # ===== Instances (Workspaces) =====
@@ -110,34 +139,39 @@ def get_cached_discord_urls(channel_id: str, tag: str) -> Optional[dict]:
     Returns the cache document or None if not cached.
     """
     collection = get_discord_cache_collection()
-    tag = tag.lstrip('#')
+    tag = tag.lstrip("#")
     return collection.find_one({"channel_id": channel_id, "tag": tag})
 
 
-def update_discord_cache(channel_id: str, tag: str, urls: List[str], last_message_id: str):
+def update_discord_cache(
+    channel_id: str, tag: str, urls: List[str], last_message_id: str
+):
     """
     Upsert Discord cache with new/merged URLs.
     Stores last_message_id for incremental scraping.
     """
     collection = get_discord_cache_collection()
-    tag = tag.lstrip('#')
+    tag = tag.lstrip("#")
     collection.update_one(
         {"channel_id": channel_id, "tag": tag},
-        {"$set": {
-            "urls": urls,
-            "last_message_id": last_message_id,
-            "last_scraped_at": datetime.utcnow()
-        }},
-        upsert=True
+        {
+            "$set": {
+                "urls": urls,
+                "last_message_id": last_message_id,
+                "last_scraped_at": datetime.utcnow(),
+            }
+        },
+        upsert=True,
     )
     print(f"📦 Cached {len(urls)} URLs for #{tag} in channel {channel_id}")
 
 
-def create_instance(username: str, name: str, description: str = "", 
-                    discord_channel_id: str = None) -> dict:
+def create_instance(
+    username: str, name: str, description: str = "", discord_channel_id: str = None
+) -> dict:
     """
     Create a new instance for a user.
-    
+
     Args:
         username: Owner username
         name: Instance name (also used as Discord #tag if discord_channel_id is set)
@@ -167,7 +201,7 @@ def create_instance(username: str, name: str, description: str = "",
 
 
 def get_user_instances(username: str) -> List[dict]:
-    """Get all instances for a user."""
+    """Get all instances for a user (newest first)."""
     collection = get_instances_collection()
     instances = list(
         collection.find(
@@ -181,7 +215,7 @@ def get_user_instances(username: str) -> List[dict]:
                 "discord_channel_id": 1,
                 "created_at": 1,
             },
-        ).sort("created_at", 1)
+        ).sort("created_at", -1)  # -1 = descending (newest first)
     )
     return instances
 
@@ -279,18 +313,18 @@ async def get_current_user(
 async def require_auth(
     credentials: HTTPAuthorizationCredentials = Depends(security),
 ) -> dict:
-    """Require authentication. Raises 405 if not authenticated."""
+    """Require authentication. Raises 401 if not authenticated."""
     if not credentials:
-        raise HTTPException(status_code=405, detail="Not authenticated")
+        raise HTTPException(status_code=401, detail="Not authenticated")
 
     payload = decode_token(credentials.credentials)
     if not payload:
-        raise HTTPException(status_code=405, detail="Invalid token")
+        raise HTTPException(status_code=401, detail="Invalid token")
 
     username = payload.get("sub")
     user = get_users_collection().find_one({"username": username})
     if not user:
-        raise HTTPException(status_code=405, detail="User not found")
+        raise HTTPException(status_code=401, detail="User not found")
 
     return user
 
@@ -359,11 +393,11 @@ async def login(user: UserLogin):
     # Find user
     user_doc = get_users_collection().find_one({"username": user.username})
     if not user_doc:
-        raise HTTPException(status_code=405, detail="Invalid username or password")
+        raise HTTPException(status_code=401, detail="Invalid username or password")
 
     # Verify password
     if not verify_password(user.password, user_doc["password_hash"]):
-        raise HTTPException(status_code=405, detail="Invalid username or password")
+        raise HTTPException(status_code=401, detail="Invalid username or password")
 
     # Create token
     token = create_access_token({"sub": user.username})

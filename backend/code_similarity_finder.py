@@ -480,14 +480,17 @@ def analyze_hybrid(
     vector_engine = get_vector_engine()
 
     if not vector_engine.enabled:
-        print("⚠️ Vector engine disabled. Falling back to Direct Mode.")
-        return analyze_full(target_name, submissions, options, max_workers)
+        return {"error": "Vector engine is not available. Check PINECONE_API_KEY and server logs for initialization errors."}
 
     # 1. Ingest (if not already there - naive check, ideally we track state)
     # For this implementation, we re-ingest to ensure freshness.
     # Pinecone upsert is idempotent.
     print(f"🌲 Ingesting {len(submissions)} files into namespace '{namespace}'...")
-    vector_engine.ingest_code(submissions, namespace)
+    success = vector_engine.ingest_code(submissions, namespace)
+    
+    if not success:
+        print("⚠️ Vector ingestion failed. Falling back to Full Analysis on all files.")
+        return analyze_full(target_name, submissions, options, max_workers)
 
     # 2. Retrieve Candidates
     target_code = submissions.get(target_name)

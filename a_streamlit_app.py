@@ -7,9 +7,10 @@ Two modes:
 - Preprocess: Upload → Preprocess → Select target → Compare (keeps embeddings)
 """
 
+from collections import Counter
+
 import requests
 import streamlit as st
-from collections import Counter
 from streamlit_cookies_manager import EncryptedCookieManager
 
 # Initialize cookies (must be at top, before any st calls)
@@ -24,10 +25,15 @@ if not cookies.ready():
 
 # API endpoint - tries localhost first, falls back to remote
 try:
-    requests.get("http://localhost:7860/", timeout=1)
+    requests.get("http://localhost:7860/", timeout=2)
     API_BASE_URL = "http://localhost:7860"
 except:
+    # HF Spaces need longer timeout for cold start wake-up
     API_BASE_URL = "https://arnavam-copyadi-finder.hf.space"
+    try:
+        requests.get(API_BASE_URL + "/", timeout=10)  # Wake up the space
+    except:
+        pass  # Will show error in sidebar if still unreachable
 
 
 # ===== Auth Helper Functions =====
@@ -41,10 +47,10 @@ def calculate_overall_match(score_values):
     """
     if not score_values:
         return 0
-        
+
     counts = Counter(score_values)
     max_freq = max(counts.values())
-    
+
     if max_freq == 1:
         # All unique -> take highest score
         return max(score_values)
@@ -97,7 +103,8 @@ def register_user(username: str, password: str, invite_code: str = None) -> bool
             try:
                 error_detail = response.json().get("detail", "Registration failed")
             except:
-                error_detail = f"Registration failed (HTTP {response.status_code})"
+                error_detail = f"Registration failed (HTTP {
+                    response.status_code})"
             st.error(error_detail)
             return False
     except requests.exceptions.ConnectionError:
@@ -131,10 +138,25 @@ def is_logged_in() -> bool:
     return False
 
 
+def handle_api_error(e):
+    """Handle API errors with consistent messaging."""
+    if e.response.status_code == 401:
+        st.error("Session expired. Please login again.")
+        logout_user()
+    else:
+        try:
+            error_detail = e.response.json().get("detail", str(e))
+        except:
+            error_detail = str(e)
+        st.error(f"API Error: {error_detail}")
+
+
 # ===== API Functions =====
 
 
-def analyze_via_api(submissions, target_file, preprocessing_options, mode="fast", instance_id=None):
+def analyze_via_api(
+    submissions, target_file, preprocessing_options, mode="fast", instance_id=None
+):
     """
     Unified analysis API. Modes: 'fast', 'full', 'hybrid'.
     """
@@ -144,7 +166,9 @@ def analyze_via_api(submissions, target_file, preprocessing_options, mode="fast"
 
     try:
         payload = {
-            "submissions": submissions if not st.session_state.get("buffer_id") else None,
+            "submissions": submissions
+            if not st.session_state.get("buffer_id")
+            else None,
             "buffer_id": st.session_state.get("buffer_id"),
             "target_file": target_file,
             "preprocessing_options": preprocessing_options,
@@ -161,11 +185,7 @@ def analyze_via_api(submissions, target_file, preprocessing_options, mode="fast"
         response.raise_for_status()
         return response.json()
     except requests.exceptions.HTTPError as e:
-        if e.response.status_code == 401:
-            st.error("Session expired. Please login again.")
-            logout_user()
-        else:
-            st.error(f"API Error: {e}")
+        handle_api_error(e)
         return None
     except Exception as e:
         st.error(f"API Error: {e}")
@@ -189,7 +209,8 @@ def upload_files_to_api(files, ignore_patterns=None):
     file_data = []
     for f in files:
         f.seek(0)
-        file_data.append(("files", (f.name, f.read(), "application/octet-stream")))
+        file_data.append(
+            ("files", (f.name, f.read(), "application/octet-stream")))
 
     params = {}
     if ignore_patterns:
@@ -205,11 +226,7 @@ def upload_files_to_api(files, ignore_patterns=None):
         response.raise_for_status()
         return response.json()
     except requests.exceptions.HTTPError as e:
-        if e.response.status_code == 401:
-            st.error("Session expired. Please login again.")
-            logout_user()
-        else:
-            st.error(f"API Error: {e}")
+        handle_api_error(e)
         return {}
     except Exception as e:
         st.error(f"API Error: {e}")
@@ -231,11 +248,7 @@ def process_github_via_api(urls, ignore_patterns=None):
         response.raise_for_status()
         return response.json()
     except requests.exceptions.HTTPError as e:
-        if e.response.status_code == 401:
-            st.error("Session expired. Please login again.")
-            logout_user()
-        else:
-            st.error(f"API Error: {e}")
+        handle_api_error(e)
         return {}
     except Exception as e:
         st.error(f"API Error: {e}")
@@ -260,16 +273,27 @@ def fetch_github_history(instance_id=None):
         return []
 
 
-def fetch_instance_details(instance_id):
-    """Fetch single instance details - this triggers Discord URL scraping."""
+def fetch_instance_details(instance_id, sync_discord=False, force_refresh=False):
+    """
+    Fetch single instance details.
+
+    Args:
+        instance_id: The instance ID to fetch
+        sync_discord: If True, trigger Discord scraping.
+        force_refresh: If True, ignore cache and scrape all messages.
+    """
     if not is_logged_in():
         return None
 
     try:
+        params = {"sync_discord": sync_discord, "force_refresh": force_refresh}
         response = requests.get(
             f"{API_BASE_URL}/instances/{instance_id}",
+            params=params,
             headers=get_auth_headers(),
-            timeout=30,  # Discord scraping may take time
+            timeout=120
+            if sync_discord
+            else 10,  # Longer timeout for potential full scrape
         )
         response.raise_for_status()
         return response.json().get("instance")
@@ -283,15 +307,12 @@ def fetch_instances():
     if not is_logged_in():
         return []
 
-    try:
-        response = requests.get(
-            f"{API_BASE_URL}/instances",
-            headers=get_auth_headers(),
-        )
-        response.raise_for_status()
-        return response.json().get("instances", [])
-    except:
-        return []
+    response = requests.get(
+        f"{API_BASE_URL}/instances",
+        headers=get_auth_headers(),
+    )
+    response.raise_for_status()
+    return response.json().get("instances", [])
 
 
 def create_new_instance(name, description="", discord_channel_id=None):
@@ -303,7 +324,7 @@ def create_new_instance(name, description="", discord_channel_id=None):
         params = {"name": name, "description": description}
         if discord_channel_id:
             params["discord_channel_id"] = discord_channel_id
-        
+
         response = requests.post(
             f"{API_BASE_URL}/instances",
             params=params,
@@ -348,6 +369,7 @@ def delete_instance_api(instance_id):
     except:
         return False
 
+
 def upload_individual_to_api(files, ignore_patterns=None):
     """Upload files where each file/ZIP = ONE submission."""
     if not is_logged_in():
@@ -357,7 +379,8 @@ def upload_individual_to_api(files, ignore_patterns=None):
     file_data = []
     for f in files:
         f.seek(0)
-        file_data.append(("files", (f.name, f.read(), "application/octet-stream")))
+        file_data.append(
+            ("files", (f.name, f.read(), "application/octet-stream")))
 
     params = {}
     if ignore_patterns:
@@ -373,11 +396,7 @@ def upload_individual_to_api(files, ignore_patterns=None):
         response.raise_for_status()
         return response.json()
     except requests.exceptions.HTTPError as e:
-        if e.response.status_code == 401:
-            st.error("Session expired. Please login again.")
-            logout_user()
-        else:
-            st.error(f"API Error: {e}")
+        handle_api_error(e)
         return {}
     except Exception as e:
         st.error(f"API Error: {e}")
@@ -407,11 +426,7 @@ def get_similar_regions_via_api(file1_name, file1_content, file2_name, file2_con
         response.raise_for_status()
         return response.json()
     except requests.exceptions.HTTPError as e:
-        if e.response.status_code == 401:
-            st.error("Session expired. Please login again.")
-            logout_user()
-        else:
-            st.error(f"API Error: {e}")
+        handle_api_error(e)
         return None
     except Exception as e:
         st.error(f"API Error: {e}")
@@ -442,15 +457,16 @@ def display_results(result):
                 row[clean_cat] = val
                 total_score += val
                 count += 1
-                
+
                 # Collect values for mode/max calculation
                 if "score_values" not in row:
                     row["score_values"] = []
                 row["score_values"].append(val)
 
         # Calculate overall score using shared helper
-        row["Overall Match"] = calculate_overall_match(row.get("score_values", []))
-        
+        row["Overall Match"] = calculate_overall_match(
+            row.get("score_values", []))
+
         # Cleanup temp list
         if "score_values" in row:
             del row["score_values"]
@@ -582,7 +598,8 @@ def display_similar_regions(regions_result, file1_name, file2_name):
             # Show top matches in a cleaner grid
             for i, match in enumerate(token_matches[:10]):
                 st.markdown(
-                    f"**Match #{i + 1}**: {match['token_count']} matching tokens"
+                    f"**Match #{i +
+                                1}**: {match['token_count']} matching tokens"
                 )
 
                 c1, c2 = st.columns(2)
@@ -596,10 +613,12 @@ def display_similar_regions(regions_result, file1_name, file2_name):
 
 
 def main():
-    st.set_page_config(page_title="Copyadi Checker", page_icon="🔍", layout="wide")
+    st.set_page_config(page_title="Copyadi Checker",
+                       page_icon="🔍", layout="wide")
 
     st.title("🔍 Copyadi Checker")
-    st.markdown("Compare new submissions against batch uploads of previous submissions")
+    st.markdown(
+        "Compare new submissions against batch uploads of previous submissions")
 
     ignore_patterns = None
 
@@ -635,7 +654,8 @@ def main():
 
             with auth_tab2:
                 with st.form("register_form"):
-                    reg_username = st.text_input("Username", key="reg_username")
+                    reg_username = st.text_input(
+                        "Username", key="reg_username")
                     reg_password = st.text_input(
                         "Password", type="password", key="reg_password"
                     )
@@ -666,9 +686,18 @@ def main():
             # --- Logged In: Show Workspaces First ---
             st.sidebar.subheader("📦 Workspaces")
 
-            instances = fetch_instances()
+            try:
+                instances = fetch_instances()
+
+            except Exception as e:
+                st.sidebar.error(f"❌ API Error: {e}")
+                instances = None
 
             if instances:
+                # Ensure newest first (sort by created_at descending)
+                instances.sort(key=lambda x: x.get(
+                    "created_at", ""), reverse=True)
+
                 # Create display names for selector
                 instance_options = {
                     inst["instance_id"]: f"{inst['name']}" for inst in instances
@@ -698,11 +727,52 @@ def main():
 
                 # Show current instance info
                 current_inst = next(
-                    (i for i in instances if i["instance_id"] == selected_id), None
+                    (i for i in instances if i["instance_id"]
+                     == selected_id), None
                 )
                 if current_inst:
                     if current_inst.get("description"):
                         st.sidebar.caption(current_inst["description"])
+
+                    # Add Discord sync button if workspace has Discord channel
+                    if current_inst.get("discord_channel_id"):
+                        col1, col2 = st.sidebar.columns([2, 1])
+                        with col1:
+                            sync_btn = st.button(
+                                "🔄 Sync Discord", key="sync_discord_btn"
+                            )
+                        with col2:
+                            force_refresh = st.checkbox(
+                                "Force",
+                                key="force_scrape",
+                                help="Ignore cache and re-scrape all messages",
+                            )
+
+                        if sync_btn:
+                            with st.spinner(
+                                f"Fetching URLs from Discord... {
+                                    '(Full Rescan)' if force_refresh else ''}"
+                            ):
+                                # Pass sync_discord=True to trigger Discord scraping
+                                details = fetch_instance_details(
+                                    current_inst["instance_id"],
+                                    sync_discord=True,
+                                    force_refresh=force_refresh,
+                                )
+                                if details and details.get("github_urls"):
+                                    # Update session state so URLs appear in text area
+                                    st.session_state.github_urls_input = "\n".join(
+                                        details["github_urls"]
+                                    )
+                                    st.sidebar.success(
+                                        f"✅ Loaded {
+                                            len(details['github_urls'])} URLs!"
+                                    )
+                                    st.rerun()
+                                else:
+                                    st.sidebar.warning(
+                                        "No URLs found with matching tag in Discord"
+                                    )
 
                     # Show stored URLs for this instance
                     stored_urls = current_inst.get("github_urls", [])
@@ -712,39 +782,29 @@ def main():
                         ):
                             for url in stored_urls:
                                 st.markdown(f"[{url.split('/')[-1]}]({url})")
-                    
-                    # Add Discord sync button if workspace has Discord channel
-                    if current_inst.get("discord_channel_id"):
-                        if st.sidebar.button("🔄 Sync Discord URLs", key="sync_discord_btn"):
-                            with st.spinner("Fetching URLs from Discord..."):
-                                details = fetch_instance_details(current_inst["instance_id"])
-                                if details and details.get("github_urls"):
-                                    # Update session state so URLs appear in text area
-                                    st.session_state.github_urls_input = "\n".join(details["github_urls"])
-                                    st.sidebar.success(f"✅ Loaded {len(details['github_urls'])} URLs!")
-                                    st.rerun()
-                                else:
-                                    st.sidebar.warning("No URLs found with matching tag")
-            else:
-                st.sidebar.info("No workspaces found")
+            elif instances is not None:
+                st.sidebar.info("No workspaces yet. Create one below!")
                 st.session_state.current_instance_id = None
 
             # Create new instance
             with st.sidebar.expander("➕ New Workspace", expanded=False):
-                new_name = st.text_input("Name", key="new_inst_name",
-                    help="Use Discord #tag name (e.g., 'nlp-classification')")
+                new_name = st.text_input(
+                    "Name",
+                    key="new_inst_name",
+                    help="Use Discord #tag name (e.g., 'nlp-classification')",
+                )
                 new_desc = st.text_input("Description", key="new_inst_desc")
                 discord_channel = st.text_input(
-                    "Discord Channel ID (optional)", 
+                    "Discord Channel ID (optional)",
                     key="discord_channel_id",
-                    help="If set, URLs will be auto-loaded from Discord #tag"
+                    help="If set, URLs will be auto-loaded from Discord #tag",
                 )
                 if st.button("Create", key="create_inst_btn"):
                     if new_name:
                         result = create_new_instance(
-                            new_name, 
-                            new_desc, 
-                            discord_channel if discord_channel else None
+                            new_name,
+                            new_desc,
+                            discord_channel if discord_channel else None,
                         )
                         if result:
                             st.success(f"Created: {new_name}")
@@ -768,19 +828,25 @@ def main():
         # Preprocessing options
         st.sidebar.subheader("Preprocessing Options")
         remove_comments = st.sidebar.checkbox("Remove Comments", value=True)
-        normalize_whitespace = st.sidebar.checkbox("Normalize Whitespace", value=True)
+        normalize_whitespace = st.sidebar.checkbox(
+            "Normalize Whitespace", value=True)
         preserve_variable_names = st.sidebar.checkbox(
             "Preserve Variable Names", value=True
         )
-        anonymize_literals = st.sidebar.checkbox("Anonymize Literals", value=True)
-        
+        anonymize_literals = st.sidebar.checkbox(
+            "Anonymize Literals", value=True)
+
         # Analysis Mode Selector
         analysis_mode = st.sidebar.selectbox(
             "🔬 Analysis Mode",
             options=["fast", "full", "hybrid"],
-            format_func=lambda x: {"fast": "⚡ Simple ", "full": "📊 TF-IDF", "hybrid": "🧠 LLM"}[x],
+            format_func=lambda x: {
+                "fast": "⚡ Fast (AST)",
+                "full": "📊 Full (TF-IDF)",
+                "hybrid": "🔍 Vector Search",
+            }[x],
             index=0,
-            help="Simple: Quick AST comparison | TF-IDF: +TF-IDF cosine | LLM: AI embeddings + pruning"
+            help="Fast: Quick AST comparison | Full: +TF-IDF cosine similarity | Vector: Semantic search (slow first run, needs Pinecone)",
         )
 
         # OS junk patterns - always filtered
@@ -824,7 +890,8 @@ def main():
 
         if is_logged_in():
             st.sidebar.header("🔐 Account")
-            st.sidebar.success(f"Logged in as: **{st.session_state.username}**")
+            st.sidebar.success(
+                f"Logged in as: **{st.session_state.username}**")
             if st.sidebar.button("Logout"):
                 logout_user()
                 st.rerun()
@@ -863,17 +930,24 @@ def main():
         if current_instance_id:
             instances = fetch_instances()
             current_inst = next(
-                (i for i in instances if i["instance_id"] == current_instance_id), None
+                (i for i in instances if i["instance_id"]
+                 == current_instance_id), None
             )
             if current_inst:
                 stored_urls = current_inst.get("github_urls", [])
 
         # Initialize session state for URL input if not set
         if "github_urls_input" not in st.session_state:
-            st.session_state.github_urls_input = "\n".join(stored_urls) if stored_urls else ""
+            st.session_state.github_urls_input = (
+                "\n".join(stored_urls) if stored_urls else ""
+            )
 
         # Add Load from Workspace button
-        if st.button("📥 Load from Workspace", key="load_workspace_urls", use_container_width=False):
+        if st.button(
+            "📥 Load from Workspace",
+            key="load_workspace_urls",
+            use_container_width=False,
+        ):
             if current_instance_id and stored_urls:
                 st.session_state.github_urls_input = "\n".join(stored_urls)
                 st.rerun()
@@ -911,26 +985,30 @@ def main():
 
                     # Process URLs
                     with st.spinner(f"Processing {len(urls)} URLs..."):
-                        result_data = process_github_via_api(urls, ignore_patterns)
+                        result_data = process_github_via_api(
+                            urls, ignore_patterns)
                         if result_data:
                             st.session_state.buffer_id = result_data["buffer_id"]
                             st.session_state.filenames = result_data["filenames"]
-                            st.session_state.all_submissions = {name: "" for name in result_data["filenames"]}
+                            st.session_state.all_submissions = {
+                                name: "" for name in result_data["filenames"]
+                            }
                         else:
                             st.session_state.all_submissions = {}
-
 
                     # Run analysis immediately
                     if st.session_state.all_submissions:
                         with st.spinner("Analyzing all submissions..."):
-                            target = next(iter(st.session_state.all_submissions.keys()))
+                            target = next(
+                                iter(st.session_state.all_submissions.keys()))
                             result = analyze_via_api(
-                                    st.session_state.all_submissions,
-                                    target,
-                                    preprocessing_options,
-                                    mode=analysis_mode,
-                                    instance_id=st.session_state.get("current_instance_id"),
-                                )
+                                st.session_state.all_submissions,
+                                target,
+                                preprocessing_options,
+                                mode=analysis_mode,
+                                instance_id=st.session_state.get(
+                                    "current_instance_id"),
+                            )
                         if result:
                             st.session_state.analysis_result = result
                     else:
@@ -954,18 +1032,22 @@ def main():
                         update_instance_urls_api(current_instance_id, urls)
 
                     with st.spinner(f"Processing {len(urls)} URLs..."):
-                        result_data = process_github_via_api(urls, ignore_patterns)
+                        result_data = process_github_via_api(
+                            urls, ignore_patterns)
                         if result_data:
                             st.session_state.buffer_id = result_data["buffer_id"]
                             st.session_state.filenames = result_data["filenames"]
-                            st.session_state.all_submissions = {name: "" for name in result_data["filenames"]}
+                            st.session_state.all_submissions = {
+                                name: "" for name in result_data["filenames"]
+                            }
                         else:
                             st.session_state.all_submissions = {}
 
                         st.session_state.is_preprocessed = False
                         st.session_state.preprocessed_embeddings = None
                     st.success(
-                        f"✅ Loaded {len(st.session_state.all_submissions)} submissions"
+                        f"✅ Loaded {
+                            len(st.session_state.all_submissions)} submissions"
                     )
                 else:
                     st.warning("Please enter at least one URL")
@@ -983,14 +1065,17 @@ def main():
                 if result_data:
                     st.session_state.buffer_id = result_data["buffer_id"]
                     st.session_state.filenames = result_data["filenames"]
-                    st.session_state.all_submissions = {name: "" for name in result_data["filenames"]}
+                    st.session_state.all_submissions = {
+                        name: "" for name in result_data["filenames"]
+                    }
                 else:
                     st.session_state.all_submissions = {}
                 st.session_state.is_preprocessed = False
                 st.session_state.preprocessed_embeddings = None
 
             st.success(
-                f"✅ Loaded {len(st.session_state.all_submissions)} submissions from ZIP"
+                f"✅ Loaded {len(st.session_state.all_submissions)
+                            } submissions from ZIP"
             )
 
     with tab3:
@@ -1022,16 +1107,21 @@ def main():
 
         if prev_submissions:
             with st.spinner(f"Processing {len(prev_submissions)} files..."):
-                result_data = upload_individual_to_api(prev_submissions, ignore_patterns)
+                result_data = upload_individual_to_api(
+                    prev_submissions, ignore_patterns
+                )
                 if result_data:
                     st.session_state.buffer_id = result_data["buffer_id"]
                     st.session_state.filenames = result_data["filenames"]
-                    st.session_state.all_submissions = {name: "" for name in result_data["filenames"]}
+                    st.session_state.all_submissions = {
+                        name: "" for name in result_data["filenames"]
+                    }
                 else:
                     st.session_state.all_submissions = {}
                 st.session_state.is_preprocessed = False
                 st.session_state.preprocessed_embeddings = None
-            st.success(f"✅ Loaded {len(st.session_state.all_submissions)} submissions")
+            st.success(
+                f"✅ Loaded {len(st.session_state.all_submissions)} submissions")
 
     all_submissions = st.session_state.all_submissions
 
@@ -1050,9 +1140,11 @@ def main():
         if st.button("🔍 Analyze Selected", use_container_width=True):
             with st.spinner("Analyzing all submissions..."):
                 result = analyze_via_api(
-                    all_submissions, target_file, preprocessing_options,
+                    all_submissions,
+                    target_file,
+                    preprocessing_options,
                     mode=analysis_mode,
-                    instance_id=st.session_state.get("current_instance_id")
+                    instance_id=st.session_state.get("current_instance_id"),
                 )
             if result:
                 st.session_state.analysis_result = result
@@ -1081,7 +1173,7 @@ def main():
                 for score_type, values in scores.items():
                     if values and i < len(values):
                         score_values.append(values[i])
-                
+
                 final_scores.append(calculate_overall_match(score_values))
 
             # Sort by score (descending)
@@ -1111,21 +1203,23 @@ def main():
                     with st.spinner("Analyzing code regions..."):
                         regions_result = get_similar_regions_via_api(
                             target_file,
-                            None, # No content needed if buffer_id is available
+                            None,  # No content needed if buffer_id is available
                             selected_file,
                             None,
                         )
                     if regions_result:
                         st.session_state.regions_result = regions_result
-                        st.session_state.regions_files = (target_file, selected_file)
+                        st.session_state.regions_files = (
+                            target_file, selected_file)
                 else:
                     st.error("Cannot find file content for comparison")
 
         # Display similar regions if available
         if "regions_result" in st.session_state and st.session_state.regions_result:
-            file1, file2 = st.session_state.get("regions_files", ("File 1", "File 2"))
-            display_similar_regions(st.session_state.regions_result, file1, file2)
-
+            file1, file2 = st.session_state.get(
+                "regions_files", ("File 1", "File 2"))
+            display_similar_regions(
+                st.session_state.regions_result, file1, file2)
 
 
 if __name__ == "__main__":

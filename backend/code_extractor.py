@@ -292,38 +292,34 @@ def extract_from_url(
 
     # Otherwise treat as a single file download
     submissions = {}
-    try:
-        # Add User-Agent to avoid GitHub blocking requests
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        }
-        response = requests.get(url, timeout=30, stream=True, headers=headers)
-        response.raise_for_status()
+    
+    # Add User-Agent to avoid GitHub blocking requests
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    }
+    response = requests.get(url, timeout=30, stream=True, headers=headers)
+    response.raise_for_status()
 
-        # Determine filename
-        filename = url.split("/")[-1].split("?")[0]  # Remove query params
+    # Determine filename
+    filename = url.split("/")[-1].split("?")[0]  # Remove query params
 
-        # Try to get filename from Content-Disposition header
-        if "Content-Disposition" in response.headers:
-            fname_match = re.findall(
-                r'filename="?([^"]+)"?', response.headers["Content-Disposition"]
-            )
-            if fname_match:
-                filename = fname_match[0]
+    # Try to get filename from Content-Disposition header
+    if "Content-Disposition" in response.headers:
+        fname_match = re.findall(
+            r'filename="?([^"]+)"?', response.headers["Content-Disposition"]
+        )
+        if fname_match:
+            filename = fname_match[0]
 
-        # Read content
-        content_bytes = response.content
+    # Read content
+    content_bytes = response.content
 
-        text = extract_text(content_bytes, filename)
-        if text.strip():
-            # Use filename (without extension) as submission name, or full filename
-            # For consistency with github (repo name), let's use full filename
-            # or maybe filename as submission name.
-            submissions[filename] = text
-
-    except Exception as e:
-        print(f"Error processing URL {url}: {e}")
-        pass
+    text = extract_text(content_bytes, filename)
+    if text.strip():
+        # Use filename (without extension) as submission name, or full filename
+        # For consistency with github (repo name), let's use full filename
+        # or maybe filename as submission name.
+        submissions[filename] = text
 
     return submissions
 
@@ -346,23 +342,20 @@ def extract_from_github(
 
     submissions = {}
 
-    try:
-        repo_name = url.split("/")[-1].replace(".git", "")
-        with tempfile.TemporaryDirectory() as temp_dir:
-            git.Repo.clone_from(url, temp_dir)
-            folder_submissions = extract_from_folder(temp_dir, ignore_patterns)
+    repo_name = url.split("/")[-1].replace(".git", "")
+    with tempfile.TemporaryDirectory() as temp_dir:
+        git.Repo.clone_from(url, temp_dir)
+        folder_submissions = extract_from_folder(temp_dir, ignore_patterns)
 
-            # Combine all files into one submission per repo
-            if folder_submissions:
-                combined_content = "\n\n".join(
-                    [
-                        f"# === {filename} ===\n{content}"
-                        for filename, content in folder_submissions.items()
-                    ]
-                )
-                submissions[repo_name] = combined_content
-    except Exception:
-        pass
+        # Combine all files into one submission per repo
+        if folder_submissions:
+            combined_content = "\n\n".join(
+                [
+                    f"# === {filename} ===\n{content}"
+                    for filename, content in folder_submissions.items()
+                ]
+            )
+            submissions[repo_name] = combined_content
 
     return submissions
 

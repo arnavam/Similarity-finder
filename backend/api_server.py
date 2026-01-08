@@ -26,16 +26,18 @@ from code_extractor import (
     extract_text,
     extract_zip_as_single,
 )
+from code_region_similarity_finder import get_similar_regions
 from code_similarity_finder import (
     analyze_direct,
     analyze_full,
     analyze_hybrid,
-    compare_preprocessed as compare_preprocessed_fn,
     preprocess_all,
 )
-from code_region_similarity_finder import get_similar_regions
-
+from code_similarity_finder import (
+    compare_preprocessed as compare_preprocessed_fn,
+)
 from fastapi import Body, Depends, FastAPI, File, HTTPException, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from submission_buffer import get_buffer
@@ -55,6 +57,19 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# Eager load Vector Engine at startup (downloads ~1GB model)
+@app.on_event("startup")
+async def startup_event():
+    from vector_engine import get_vector_engine
+
+    print("🚀 Pre-loading Vector Engine at startup...")
+    engine = get_vector_engine()
+    if engine.enabled:
+        print("✅ Vector Engine ready!")
+    else:
+        print("⚠️ Vector Engine not available (check logs above for errors)")
 
 
 # ===== request models =====
@@ -79,9 +94,7 @@ class SimilarRegionsRequest(BaseModel):
 
     buffer_id: Optional[str] = None
     file1_name: str
-    file1_content: Optional[str] = None
     file2_name: str
-    file2_content: Optional[str] = None
     block_threshold: float = 0.6  # Minimum similarity for function/class matches
     min_tokens: int = 2  # Minimum tokens for sequence matches
 
@@ -89,8 +102,8 @@ class SimilarRegionsRequest(BaseModel):
 # ===== response models =====
 
 
-class ExtractResponse(BaseModel): 
-    buffer_id: str 
+class ExtractResponse(BaseModel):
+    buffer_id: str
     filenames: List[str]
     count: int
 
@@ -127,22 +140,30 @@ async def extract_text_from_upload(
     all_submissions = {}
 
     for file in files:
-        content = await file.read()
+        try:
+            content = await file.read()
 
-        if file.filename.endswith(".zip"):
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as tmp:
-                tmp.write(content)
-                tmp_path = tmp.name
-            try:
-                submissions = extract_from_zip(tmp_path, patterns)
-                all_submissions.update(submissions)
-            finally:
-                os.unlink(tmp_path)
-        else:
-            text = extract_text(content, file.filename)
-            if text.strip():
-                all_submissions[file.filename] = text
-# note : add except: block here and pass the response
+            if file.filename.endswith(".zip"):
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as tmp:
+                    tmp.write(content)
+                    tmp_path = tmp.name
+                try:
+                    # CPU-bound: Zip extraction
+                    submissions = await run_in_threadpool(
+                        extract_from_zip, tmp_path, patterns
+                    )
+                    all_submissions.update(submissions)
+                finally:
+                    os.unlink(tmp_path)
+            else:
+                # CPU-bound: Text extraction (PDF/Docx/etc)
+                text = await run_in_threadpool(extract_text, content, file.filename)
+                if text.strip():
+                    all_submissions[file.filename] = text
+        except Exception as e:
+            raise HTTPException(
+                status_code=400, detail=f"Error processing '{file.filename}': {e}"
+            )
     buffer = get_buffer()
     buffer_id = buffer.save_submissions(all_submissions)
 
@@ -150,12 +171,13 @@ async def extract_text_from_upload(
         buffer_id=buffer_id,
         filenames=list(all_submissions.keys()),
         count=len(all_submissions),
-    ) #note: why count is passed is there a need ?
+    )  # note: why count is passed is there a need ?
 
 
 @app.post("/extract/urls", response_model=ExtractResponse)
 async def extract_text_from_urls(
     urls: List[str] = Body(...),
+    instance_id: Optional[str] = Body(None),
     ignore_patterns: Optional[List[str]] = Body(None),
     user: dict = Depends(require_auth),
 ):
@@ -164,7 +186,10 @@ async def extract_text_from_urls(
 
     for url in urls:
         try:
-            submissions = extract_from_url(url, ignore_patterns)
+            # CPU-bound: Remote URL extraction
+            submissions = await run_in_threadpool(
+                extract_from_url, url, ignore_patterns
+            )
             all_submissions.update(submissions)
         except Exception as e:
             raise HTTPException(
@@ -172,8 +197,8 @@ async def extract_text_from_urls(
             )
     # Save URLs to user's history
     if urls:
-        save_github_urls(user["username"], urls)
-# note: save the urls only if there is change
+        save_github_urls(user["username"], urls, instance_id)
+
     buffer = get_buffer()
     buffer_id = buffer.save_submissions(all_submissions)
 
@@ -184,13 +209,48 @@ async def extract_text_from_urls(
     )
 
 
-@app.get("/github-history")
-async def get_github_history(
-    instance_id: Optional[str] = None, user: dict = Depends(require_auth)
+@app.post("/upload-individual", response_model=ExtractResponse)
+async def upload_individual_files(
+    files: List[UploadFile] = File(...),
+    ignore_patterns: Optional[str] = None,
+    user: dict = Depends(require_auth),
 ):
-    """Get user's GitHub URL history (optionally filtered by instance)"""
-    history = get_user_github_history(user["username"], instance_id)
-    return {"history": history, "count": len(history)}
+    """Upload files where each file/ZIP = ONE submission."""
+    patterns = ignore_patterns.split(",") if ignore_patterns else None
+    all_submissions = {}
+
+    for file in files:
+        content = await file.read()
+
+        if file.filename.endswith(".zip"):
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as tmp:
+                tmp.write(content)
+                tmp_path = tmp.name
+            try:
+                # CPU-bound: Zip extraction
+                combined_text = await run_in_threadpool(
+                    extract_zip_as_single, tmp_path, file.filename, patterns
+                )
+                if combined_text.strip():
+                    submission_name = file.filename.rsplit(".", 1)[0]
+                    all_submissions[submission_name] = combined_text
+            finally:
+                os.unlink(tmp_path)
+        else:
+            # CPU-bound: Text extraction
+            text = await run_in_threadpool(extract_text, content, file.filename)
+            if text.strip():
+                all_submissions[file.filename] = text
+
+    buffer = get_buffer()
+    buffer_id = buffer.save_submissions(all_submissions)
+
+    return ExtractResponse(
+        buffer_id=buffer_id,
+        filenames=list(all_submissions.keys()),
+        count=len(all_submissions),
+    )
+
 
 
 # ===== Instance Management Endpoints =====
@@ -216,32 +276,63 @@ async def create_new_instance(
 
 
 @app.get("/instances/{instance_id}")
-async def get_instance_details(instance_id: str, user: dict = Depends(require_auth)):
-    """Get details of a specific instance. Auto-loads Discord URLs if configured."""
+async def get_instance_details(
+    instance_id: str,
+    sync_discord: bool = False,
+    force_refresh: bool = False,
+    user: dict = Depends(require_auth),
+):
+    """
+    Get details of a specific instance.
+
+    Args:
+        sync_discord: If True, scrape Discord for URLs. If False, only read from DB.
+        force_refresh: If True, ignore cache and scrape all messages.
+    """
     instance = get_instance(instance_id, user["username"])
     if not instance:
         raise HTTPException(status_code=404, detail="Instance not found")
 
-    # Auto-load Discord URLs if configured
-    if instance.get("discord_channel_id"):
+    if sync_discord:
         try:
             from discord_scraper import get_or_scrape_urls, is_discord_configured
 
-            if is_discord_configured():
-                tag = instance.get("name", "")
-                urls = get_or_scrape_urls(instance["discord_channel_id"], tag)
-                if urls:
-                    # Merge with existing URLs (Discord URLs first, then manual ones)
-                    existing = instance.get("github_urls", [])
-                    merged = urls + [u for u in existing if u not in urls]
-                    instance["github_urls"] = merged
-                    # SAVE the merged URLs to database
-                    update_instance_urls(instance_id, user["username"], merged)
-                    print(
-                        f"💾 Saved {len(merged)} URLs to instance {instance.get('name', instance_id)}"
-                    )
+            if not is_discord_configured():
+                raise Exception(
+                    "Discord NOT configured (missing bot token or discord.py)"
+                )
+
+            channel_id = instance.get("discord_channel_id")
+            if not channel_id:
+                raise Exception("This instance has no Discord channel ID linked")
+
+            tag = instance.get("name")
+            print(
+                f"🔄 Syncing Discord URLs for tag: #{tag}, channel: {
+                    channel_id
+                }, force={force_refresh}"
+            )
+
+            urls = get_or_scrape_urls(channel_id, tag, force_refresh=force_refresh)
+            if not urls:
+                raise Exception(f"No URLs found in Discord for #{tag}")
+
+            print(f"📥 Discord returned {len(urls)} URLs")
+
+            # Merge logic
+            existing = instance.get("github_urls", [])
+            merged = urls + [u for u in existing if u not in urls]
+            instance["github_urls"] = merged
+
+            update_instance_urls(instance_id, user["username"], merged)
+            print(
+                f"💾 Saved {len(merged)} URLs to instance {
+                    instance.get('name', instance_id)
+                }"
+            )
+
         except Exception as e:
-            print(f"⚠️ Discord auto-load failed: {e}")
+            print(f"⚠️ Discord sync skipped: {e}")
 
     return {"instance": instance}
 
@@ -317,18 +408,28 @@ async def analyze_similarity(
 
     if request.mode == "hybrid":
         if not request.instance_id:
-            # Fallback if no instance_id provided
-            result = analyze_direct(request.target_file, submissions, options)
+            # CPU-bound: Analysis
+            result = await run_in_threadpool(
+                analyze_direct, request.target_file, submissions, options
+            )
         else:
-            result = analyze_hybrid(
-                request.target_file, submissions, namespace=request.instance_id, options=options
+            result = await run_in_threadpool(
+                analyze_hybrid,
+                request.target_file,
+                submissions,
+                namespace=request.instance_id,
+                options=options,
             )
     elif request.mode == "full":
-        # Full analysis with TF-IDF cosine similarity
-        result = analyze_full(request.target_file, submissions, options)
+        # CPU-bound: Analysis
+        result = await run_in_threadpool(
+            analyze_full, request.target_file, submissions, options
+        )
     else:
-        # Default: fast/direct mode
-        result = analyze_direct(request.target_file, submissions, options)
+        # CPU-bound: Analysis
+        result = await run_in_threadpool(
+            analyze_direct, request.target_file, submissions, options
+        )
 
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
@@ -362,11 +463,10 @@ async def preprocess_submissions(
     submissions = buffer.get_submissions(buffer_id)
 
     if not submissions:
-        raise HTTPException(
-            status_code=400, detail="No submissions provided"
-        )
+        raise HTTPException(status_code=400, detail="No submissions provided")
 
-    embeddings = preprocess_all(submissions, options)
+    # CPU-bound: Preprocessing
+    embeddings = await run_in_threadpool(preprocess_all, submissions, options)
 
     # Save back to buffer for fast /compare later
     for name, emb_data in embeddings.items():
@@ -393,7 +493,10 @@ async def compare_preprocessed(
 
     options = request.preprocessing_options or {}
 
-    result = compare_preprocessed_fn(request.target_file, request.embeddings, options)
+    # CPU-bound: Comparison
+    result = await run_in_threadpool(
+        compare_preprocessed_fn, request.target_file, request.embeddings, options
+    )
 
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
@@ -403,56 +506,6 @@ async def compare_preprocessed(
         submission_names=result["submission_names"],
         target_file=result["target_file"],
     )
-
-
-@app.post("/extract-text")
-async def extract_single_file(file: UploadFile = File(...)):
-    """Extract text from a single file."""
-    content = await file.read()
-    text = extract_text(content, file.filename)
-    return {"filename": file.filename, "text": text, "length": len(text)}
-
-
-@app.post("/upload-individual", response_model=ExtractResponse)
-async def upload_individual_files(
-    files: List[UploadFile] = File(...),
-    ignore_patterns: Optional[str] = None,
-    user: dict = Depends(require_auth),
-):
-
-
-    """Upload files where each file/ZIP = ONE submission."""
-    patterns = ignore_patterns.split(",") if ignore_patterns else None
-    all_submissions = {}
-
-    for file in files:
-        content = await file.read()
-
-        if file.filename.endswith(".zip"):
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as tmp:
-                tmp.write(content)
-                tmp_path = tmp.name
-            try:
-                combined_text = extract_zip_as_single(tmp_path, file.filename, patterns)
-                if combined_text.strip():
-                    submission_name = file.filename.rsplit(".", 1)[0]
-                    all_submissions[submission_name] = combined_text
-            finally:
-                os.unlink(tmp_path)
-        else:
-            text = extract_text(content, file.filename)
-            if text.strip():
-                all_submissions[file.filename] = text
-
-    buffer = get_buffer()
-    buffer_id = buffer.save_submissions(all_submissions)
-
-    return ExtractResponse(
-        buffer_id=buffer_id,
-        filenames=list(all_submissions.keys()),
-        count=len(all_submissions),
-    )
-
 
 @app.post("/similar-regions")
 async def compute_similar_regions(
@@ -468,15 +521,12 @@ async def compute_similar_regions(
     - stats: Analysis statistics
     """
 
-    code1 = request.file1_content
-    code2 = request.file2_content
-
     if request.buffer_id:
         buffer = get_buffer()
         submissions = buffer.get_submissions(request.buffer_id)
-        code1 = submissions.get(request.file1_name, code1)
-        code2 = submissions.get(request.file2_name, code2)
-#note: here we only checking for if the id exists is that enough? 
+        code1 = submissions.get(request.file1_name)
+        code2 = submissions.get(request.file2_name)
+    # note: here we only checking for if the id exists is that enough?
     if not code1 or not code2:
         raise HTTPException(
             status_code=400, detail="Cannot find file content for comparison"
@@ -495,6 +545,14 @@ async def compute_similar_regions(
         **result,
     }
 
+
+@app.get("/github-history")
+async def get_github_history(
+    instance_id: Optional[str] = None, user: dict = Depends(require_auth)
+):
+    """Get user's GitHub URL history (optionally filtered by instance)"""
+    history = get_user_github_history(user["username"], instance_id)
+    return {"history": history, "count": len(history)}
 
 if __name__ == "__main__":
     import uvicorn

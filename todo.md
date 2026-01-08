@@ -15,8 +15,9 @@
 - always usage default encoding when extracting
 - names such as macox is used to find top folder
 - duplicate function usage ?
-
-
+- user can upload same file multiple times
+- user has no way to remove history urls
+- user can create multiple buffers without a limit 
 # optional features
 - directly send the code to compare / embedding etc.. to server rather than buffer id
 - @lru_cache for preprocessing

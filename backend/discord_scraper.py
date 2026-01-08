@@ -117,11 +117,7 @@ async def _scrape_channel_messages(
                     found_urls = URL_PATTERN.findall(content)
                     urls.extend(found_urls)
 
-            print(
-                f"✅ Scraped {len(messages)} messages, found {len(urls)} URLs for #{
-                    tag_lower
-                }"
-            )
+            print(f"✅ Scraped {len(messages)} messages, found {len(urls)} URLs for #{tag_lower}")
 
         except Exception as e:
             print(f"❌ Error scraping channel: {e}")
