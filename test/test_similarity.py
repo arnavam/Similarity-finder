@@ -72,7 +72,7 @@ def test_compare_embeddings():
 
 def test_analyze_direct():
     """Test direct mode: parallel process + compare."""
-    print("\n=== Test: analyze_direct (parallel processing) ===")
+    print("\n=== Test:  (parallel processing) ===")
     
     checker = FlexibleCodeSimilarityChecker(max_workers=2)
     
@@ -275,7 +275,7 @@ def main():
     try:
         test_process_to_embeddings()
         test_compare_embeddings()
-        test_analyze_direct()
+        test_()
         test_preprocess_all()
         test_compare_preprocessed()
         test_legacy_api()

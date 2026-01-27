@@ -158,24 +158,26 @@ def analyze_via_api(
     submissions, target_file, preprocessing_options, mode="fast", instance_id=None
 ):
     """
-    Unified analysis API. Modes: 'fast', 'full', 'hybrid'.
+    Unified analysis API. Modes: 'fast', 'sparse', 'vector'.
     """
     if not is_logged_in():
         st.error("Please login first")
         return None
 
     try:
-        payload = {
-            "submissions": submissions
-            if not st.session_state.get("buffer_id")
-            else None,
+        # Build context object matching API's ProcessingContext model
+        context = {
             "buffer_id": st.session_state.get("buffer_id"),
-            "target_file": target_file,
             "preprocessing_options": preprocessing_options,
-            "mode": mode,
         }
-        if mode == "hybrid" and instance_id:
-            payload["instance_id"] = instance_id
+        if mode == "vector" and instance_id:
+            context["instance_id"] = instance_id
+
+        payload = {
+            "target_file": target_file,
+            "mode": mode,
+            "context": context,
+        }
 
         response = requests.post(
             f"{API_BASE_URL}/analyze",
@@ -200,8 +202,14 @@ def get_auth_headers() -> dict:
     return {}
 
 
-def upload_files_to_api(files, ignore_patterns=None):
-    """Upload files to API and get extracted text back."""
+def upload_files_to_api(files, ignore_patterns=None, ignore=True):
+    """Upload files to API and get extracted text back.
+    
+    Args:
+        files: List of files to upload
+        ignore_patterns: Patterns to match
+        ignore: If True, skip files matching patterns. If False, only include matching files.
+    """
     if not is_logged_in():
         st.error("Please login first")
         return {}
@@ -215,10 +223,11 @@ def upload_files_to_api(files, ignore_patterns=None):
     params = {}
     if ignore_patterns:
         params["ignore_patterns"] = ",".join(ignore_patterns)
+    params["ignore"] = str(ignore).lower()  # API expects 'true'/'false' string for query params
 
     try:
         response = requests.post(
-            f"{API_BASE_URL}/extract/upload",
+            f"{API_BASE_URL}/extract/files",
             files=file_data,
             params=params,
             headers=get_auth_headers(),
@@ -233,8 +242,14 @@ def upload_files_to_api(files, ignore_patterns=None):
         return {}
 
 
-def process_github_via_api(urls, ignore_patterns=None):
-    """Process GitHub URLs via API."""
+def process_github_via_api(urls, ignore_patterns=None, ignore=True):
+    """Process GitHub URLs via API.
+    
+    Args:
+        urls: List of GitHub URLs
+        ignore_patterns: Patterns to match
+        ignore: If True, skip files matching patterns. If False, only include matching files.
+    """
     if not is_logged_in():
         st.error("Please login first")
         return {}
@@ -242,7 +257,7 @@ def process_github_via_api(urls, ignore_patterns=None):
     try:
         response = requests.post(
             f"{API_BASE_URL}/extract/urls",
-            json={"urls": urls, "ignore_patterns": ignore_patterns},
+            json={"urls": urls, "ignore_patterns": ignore_patterns, "ignore": ignore},
             headers=get_auth_headers(),
         )
         response.raise_for_status()
@@ -307,12 +322,21 @@ def fetch_instances():
     if not is_logged_in():
         return []
 
-    response = requests.get(
-        f"{API_BASE_URL}/instances",
-        headers=get_auth_headers(),
-    )
-    response.raise_for_status()
-    return response.json().get("instances", [])
+    try:
+        response = requests.get(
+            f"{API_BASE_URL}/instances",
+            headers=get_auth_headers(),
+        )
+        response.raise_for_status()
+        return response.json().get("instances", [])
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 401:
+            # Token expired or invalid - logout user and refresh to show login UI
+            logout_user()
+            st.rerun()
+        return []
+    except Exception:
+        return []
 
 
 def create_new_instance(name, description="", discord_channel_id=None):
@@ -370,8 +394,14 @@ def delete_instance_api(instance_id):
         return False
 
 
-def upload_individual_to_api(files, ignore_patterns=None):
-    """Upload files where each file/ZIP = ONE submission."""
+def upload_individual_to_api(files, ignore_patterns=None, ignore=True):
+    """Upload files where each file/ZIP = ONE submission.
+    
+    Args:
+        files: List of files to upload
+        ignore_patterns: Patterns to match
+        ignore: If True, skip files matching patterns. If False, only include matching files.
+    """
     if not is_logged_in():
         st.error("Please login first")
         return {}
@@ -385,10 +415,11 @@ def upload_individual_to_api(files, ignore_patterns=None):
     params = {}
     if ignore_patterns:
         params["ignore_patterns"] = ",".join(ignore_patterns)
+    params["ignore"] = str(ignore).lower()  # API expects 'true'/'false' string for query params
 
     try:
         response = requests.post(
-            f"{API_BASE_URL}/upload-individual",
+            f"{API_BASE_URL}/extract/zip",
             files=file_data,
             params=params,
             headers=get_auth_headers(),
@@ -501,6 +532,9 @@ def display_results(result):
                 "Token": st.column_config.NumberColumn("Token Seq", format="%.1f%%"),
                 "Cosine": st.column_config.NumberColumn(
                     "Cosine (TF-IDF)", format="%.1f%%"
+                ),
+                "Vector": st.column_config.NumberColumn(
+                    "Vector (Dense)", format="%.1f%%"
                 ),
             },
         )
@@ -839,14 +873,14 @@ def main():
         # Analysis Mode Selector
         analysis_mode = st.sidebar.selectbox(
             "🔬 Analysis Mode",
-            options=["fast", "full", "hybrid"],
+            options=["fast", "sparse", "vector"],
             format_func=lambda x: {
                 "fast": "⚡ Fast (AST)",
-                "full": "📊 Full (TF-IDF)",
-                "hybrid": "🔍 Vector Search",
+                "sparse": "📊 Sparse (TF-IDF)",
+                "vector": "🔍 Vector Search",
             }[x],
             index=0,
-            help="Fast: Quick AST comparison | Full: +TF-IDF cosine similarity | Vector: Semantic search (slow first run, needs Pinecone)",
+            help="Fast: Quick AST comparison | Sparse: +TF-IDF cosine similarity | Vector: Semantic search (slow first run, needs Pinecone)",
         )
 
         # OS junk patterns - always filtered
@@ -876,6 +910,16 @@ def main():
         )
 
         ignore_patterns = OS_JUNK_PATTERNS + user_ignore_patterns
+
+        # Toggle for pattern mode: Exclude vs Include-Only
+        pattern_mode = st.sidebar.radio(
+            "Pattern Mode",
+            ["Exclude matching", "Include only matching"],
+            index=0,
+            horizontal=True,
+            help="**Exclude**: Skip files matching patterns (default).\n\n**Include only**: Extract ONLY files matching patterns (e.g., '*.ipynb' to get only notebooks)."
+        )
+        ignore_mode = pattern_mode == "Exclude matching"  # True = exclude, False = include-only
 
         preprocessing_options = {
             "remove_comments": remove_comments,
@@ -986,7 +1030,7 @@ def main():
                     # Process URLs
                     with st.spinner(f"Processing {len(urls)} URLs..."):
                         result_data = process_github_via_api(
-                            urls, ignore_patterns)
+                            urls, ignore_patterns, ignore_mode)
                         if result_data:
                             st.session_state.buffer_id = result_data["buffer_id"]
                             st.session_state.filenames = result_data["filenames"]
@@ -1033,7 +1077,7 @@ def main():
 
                     with st.spinner(f"Processing {len(urls)} URLs..."):
                         result_data = process_github_via_api(
-                            urls, ignore_patterns)
+                            urls, ignore_patterns, ignore_mode)
                         if result_data:
                             st.session_state.buffer_id = result_data["buffer_id"]
                             st.session_state.filenames = result_data["filenames"]
@@ -1061,7 +1105,7 @@ def main():
 
         if zip_file:
             with st.spinner("Extracting text from ZIP..."):
-                result_data = upload_files_to_api([zip_file], ignore_patterns)
+                result_data = upload_files_to_api([zip_file], ignore_patterns, ignore_mode)
                 if result_data:
                     st.session_state.buffer_id = result_data["buffer_id"]
                     st.session_state.filenames = result_data["filenames"]
@@ -1108,7 +1152,7 @@ def main():
         if prev_submissions:
             with st.spinner(f"Processing {len(prev_submissions)} files..."):
                 result_data = upload_individual_to_api(
-                    prev_submissions, ignore_patterns
+                    prev_submissions, ignore_patterns, ignore_mode
                 )
                 if result_data:
                     st.session_state.buffer_id = result_data["buffer_id"]

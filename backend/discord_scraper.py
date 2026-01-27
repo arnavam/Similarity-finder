@@ -12,29 +12,17 @@ from typing import List, Optional, Tuple
 # Discord.py for bot interactions
 try:
     import discord
-
-    DISCORD_AVAILABLE = True
 except ImportError:
-    DISCORD_AVAILABLE = False
-    print("⚠️ discord.py not installed. Discord scraping disabled.")
-
-DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN")
+    raise ImportError("discord.py not installed. Discord scraping disabled.")
+try: 
+    DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN")
+except KeyError:
+    raise KeyError("DISCORD_BOT_TOKEN not set in environment")
 
 # URL regex pattern
 URL_PATTERN = re.compile(
     r"https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+[^\s]*", re.IGNORECASE
 )
-
-
-def is_discord_configured() -> bool:
-    """Check if Discord bot is properly configured."""
-    configured = DISCORD_AVAILABLE and bool(DISCORD_BOT_TOKEN)
-    if not configured:
-        if not DISCORD_AVAILABLE:
-            print("⚠️ Discord: discord.py library not available")
-        elif not DISCORD_BOT_TOKEN:
-            print("⚠️ Discord: DISCORD_BOT_TOKEN not set in environment")
-    return configured
 
 
 async def _scrape_channel_messages(
@@ -52,9 +40,6 @@ async def _scrape_channel_messages(
     Returns:
         (urls, last_message_id) - list of URLs found and ID of newest message
     """
-    if not is_discord_configured():
-        print("❌ Discord not configured")
-        return [], None
 
     intents = discord.Intents.default()
     intents.message_content = True
@@ -198,36 +183,44 @@ def get_or_scrape_urls(
 
     Returns:
         List of URLs
+        
+    Raises:
+        RuntimeError: If Discord is not configured
     """
-    # Import here to avoid circular imports
-    from auth import get_cached_discord_urls, update_discord_cache
+    import db
 
-    tag = tag.lstrip("#")
+    # Run async db functions in the current thread's event loop
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    try:
+        # Check cache
+        cached = loop.run_until_complete(db.get_cached_discord_urls(channel_id, tag))
 
-    # Check cache
-    cached = get_cached_discord_urls(channel_id, tag)
+        if cached and not force_refresh:
+            # Incremental scrape - only get new messages
+            after_id = cached.get("last_message_id")
+            new_urls, new_last_id = scrape_tag_from_channel(channel_id, tag, after_id)
 
-    if cached and not force_refresh:
-        # Incremental scrape - only get new messages
-        after_id = cached.get("last_message_id")
-        new_urls, new_last_id = scrape_tag_from_channel(channel_id, tag, after_id)
-
-        if new_urls:
-            # Merge: new URLs first, then cached (preserving order, no duplicates)
-            all_urls = new_urls + [
-                u for u in cached.get("urls", []) if u not in new_urls
-            ]
-            last_id = new_last_id or after_id
-            update_discord_cache(channel_id, tag, all_urls, last_id)
-            return all_urls
+            if new_urls:
+                # Merge: new URLs first, then cached (preserving order, no duplicates)
+                all_urls = new_urls + [
+                    u for u in cached.get("urls", []) if u not in new_urls
+                ]
+                last_id = new_last_id or after_id
+                loop.run_until_complete(db.update_discord_cache(channel_id, tag, all_urls, last_id))
+                return all_urls
+            else:
+                # No new messages, return cached
+                cached_urls = cached.get("urls", [])
+                print(f"📋 Returning {len(cached_urls)} cached URLs for #{tag}")
+                return cached_urls
         else:
-            # No new messages, return cached
-            cached_urls = cached.get("urls", [])
-            print(f"📋 Returning {len(cached_urls)} cached URLs for #{tag}")
-            return cached_urls
-    else:
-        # Full scrape
-        urls, last_id = scrape_tag_from_channel(channel_id, tag)
-        if urls and last_id:
-            update_discord_cache(channel_id, tag, urls, last_id)
-        return urls
+            # Full scrape
+            urls, last_id = scrape_tag_from_channel(channel_id, tag)
+            if urls and last_id:
+                loop.run_until_complete(db.update_discord_cache(channel_id, tag, urls, last_id))
+            return urls
+    finally:
+        loop.close()
+

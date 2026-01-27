@@ -1,11 +1,11 @@
 """
-Optimized Code Similarity Checker with parallel processing.
+Code Region Similarity Finder.
 
-Pure function-based API:
-1. analyze_direct: Process target → parallel process+compare others → discard
-2. analyze_hybrid: Vector search → prune → direct analysis
-3. preprocess_all: Parallel preprocess all → return embeddings
-4. compare_preprocessed: Compare target against preprocessed embeddings
+Functions for detailed code comparison:
+1. extract_code_blocks: Extract functions/classes as AST nodes
+2. find_similar_blocks: AST-based function/class matching
+3. find_matching_token_sequences: Token sequence matching
+4. get_similar_regions: Combined detailed similarity analysis
 """
 
 import ast
@@ -19,7 +19,7 @@ import Levenshtein
 import psutil
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-from vector_engine import get_vector_engine
+
 
 from code_similarity_finder import DEFAULT_OPTIONS, tokenize_code
 

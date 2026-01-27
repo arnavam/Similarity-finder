@@ -15,7 +15,8 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 import git
-import requests
+import httpx
+from newspaper import Article
 
 # LlamaIndex imports
 from llama_index.core import SimpleDirectoryReader
@@ -88,6 +89,7 @@ def extract_from_zip(
     zip_path_or_bytes,
     ignore_patterns: Optional[List[str]] = None,
     max_workers: Optional[int] = None,
+    ignore: bool = True,
 ) -> Dict[str, str]:
     """
     each top-level folder/file is ONE submission.
@@ -98,8 +100,9 @@ def extract_from_zip(
 
     Args:
         zip_path_or_bytes: Either a file path or file-like object/bytes
-        ignore_patterns: Patterns to skip
+        ignore_patterns: Patterns to match
         max_workers: Max threads for parallel extraction (default: CPU count)
+        ignore: If True (default), skip files matching patterns. If False, only include files matching patterns.
 
     Returns:
         Dict mapping submission name to combined content
@@ -107,7 +110,7 @@ def extract_from_zip(
     if ignore_patterns is None:
         ignore_patterns = []
     # Always ignore macOS junk folders
-    ignore_patterns = ["__MACOSX", "__MACOSX/*"] + ignore_patterns
+    # ignore_patterns = ["__MACOSX", "__MACOSX/*"] + ignore_patterns
 
     if max_workers is None:
         max_workers = os.cpu_count() or 4
@@ -121,7 +124,7 @@ def extract_from_zip(
             top_level_items = set()
             print("\n=== ZIP FILE STRUCTURE ===")
             for file_info in zip_ref.filelist:
-                if _should_ignore(file_info.filename, ignore_patterns):
+                if _should_ignore(file_info.filename, ignore_patterns) == ignore:
                     continue
                 print(f"  {file_info.filename}")
                 if file_info.filename.endswith("/"):
@@ -140,7 +143,7 @@ def extract_from_zip(
             for file_info in zip_ref.filelist:
                 if file_info.filename.endswith("/"):
                     continue
-                if _should_ignore(file_info.filename, ignore_patterns):
+                if _should_ignore(file_info.filename, ignore_patterns) == ignore:
                     continue
 
                 # Determine submission name based on depth
@@ -212,6 +215,7 @@ def extract_zip_as_single(
     zip_path_or_bytes,
     zip_name: str = "submission",
     ignore_patterns: Optional[List[str]] = None,
+    ignore: bool = True,
 ) -> str:
     """
     Extract ALL files from a ZIP and combine into ONE submission string.
@@ -221,7 +225,8 @@ def extract_zip_as_single(
     Args:
         zip_path_or_bytes: Either a file path or file-like object/bytes
         zip_name: Name to use for this submission
-        ignore_patterns: Patterns to skip
+        ignore_patterns: Patterns to match
+        ignore: If True (default), skip files matching patterns. If False, only include files matching patterns.
 
     Returns:
         Combined content of all files as single string
@@ -237,7 +242,7 @@ def extract_zip_as_single(
                 if file_info.filename.endswith("/"):
                     continue
 
-                if _should_ignore(file_info.filename, ignore_patterns):
+                if _should_ignore(file_info.filename, ignore_patterns) == ignore:
                     continue
 
                 with zip_ref.open(file_info.filename) as f:
@@ -256,22 +261,97 @@ def extract_zip_as_single(
     return "\n\n".join(all_content)
 
 
-def extract_from_url(
-    url: str, ignore_patterns: Optional[List[str]] = None
+def _is_medium_url(url: str) -> bool:
+    """
+    Check if a URL is a Medium article.
+    Handles:
+    - medium.com/@username/article
+    - username.medium.com/article
+    - Custom domains using Medium (checks response headers)
+    """
+    medium_patterns = [
+        "medium.com",
+        ".medium.com",
+        "towardsdatascience.com",
+        "betterprogramming.pub",
+        "levelup.gitconnected.com",
+        "blog.devgenius.io",
+        "javascript.plainenglish.io",
+        "python.plainenglish.io",
+        "aws.plainenglish.io",
+    ]
+    return any(pattern in url.lower() for pattern in medium_patterns)
+
+
+def extract_from_medium(url: str) -> Dict[str, str]:
+    """
+    Extract article content from a Medium URL using newspaper3k.
+    
+    Args:
+        url: Medium article URL
+        
+    Returns:
+        Dict with article title as key and content as value
+    """
+    try:
+        article = Article(url)
+        article.download()
+        article.parse()
+        
+        # Build content with metadata
+        content_parts = []
+        
+        if article.title:
+            content_parts.append(f"# {article.title}")
+        
+        if article.authors:
+            content_parts.append(f"**Authors:** {', '.join(article.authors)}")
+        
+        if article.publish_date:
+            content_parts.append(f"**Published:** {article.publish_date}")
+        
+        if article.text:
+            content_parts.append(f"\n{article.text}")
+        
+        combined_content = "\n\n".join(content_parts)
+        
+        # Use title as submission name, fallback to URL slug
+        submission_name = article.title if article.title else url.split("/")[-1].split("?")[0]
+        # Clean up submission name for use as key
+        submission_name = re.sub(r'[^\w\s-]', '', submission_name).strip()[:100]
+        
+        if combined_content.strip():
+            return {submission_name: combined_content}
+        
+        return {}
+        
+    except Exception as e:
+        print(f"Error extracting Medium article: {e}")
+        return {}
+
+
+async def extract_from_url(
+    url: str, ignore_patterns: Optional[List[str]] = None, ignore: bool = True
 ) -> Dict[str, str]:
     """
     Extract text from a URL.
+    - If Medium article URL: Extracts article text using newspaper3k.
     - If GitHub repo URL: Clones and extracts all files (one submission).
     - If GitHub blob URL: Converts to raw URL and downloads the file.
     - If direct file URL (PDF, TXT, etc.): Downloads and extracts (one submission).
 
     Args:
         url: URL to process
-        ignore_patterns: Patterns to skip
+        ignore_patterns: Patterns to match
+        ignore: If True (default), skip files matching patterns. If False, only include files matching patterns.
 
     Returns:
         Dict mapping submission name to content
     """
+    # Check if it's a Medium article
+    if _is_medium_url(url):
+        return extract_from_medium(url)
+    
     # Convert GitHub blob URLs to raw URLs
     # e.g., https://github.com/user/repo/blob/main/file.py
     #    -> https://raw.githubusercontent.com/user/repo/main/file.py
@@ -288,7 +368,7 @@ def extract_from_url(
     )
 
     if is_github_repo:
-        return extract_from_github(url, ignore_patterns)
+        return extract_from_github(url, ignore_patterns, ignore)
 
     # Otherwise treat as a single file download
     submissions = {}
@@ -297,42 +377,42 @@ def extract_from_url(
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     }
-    response = requests.get(url, timeout=30, stream=True, headers=headers)
-    response.raise_for_status()
+    
+    async with httpx.AsyncClient(timeout=30) as client:
+        response = await client.get(url, headers=headers)
+        response.raise_for_status()
 
-    # Determine filename
-    filename = url.split("/")[-1].split("?")[0]  # Remove query params
+        # Determine filename
+        filename = url.split("/")[-1].split("?")[0]  # Remove query params
 
-    # Try to get filename from Content-Disposition header
-    if "Content-Disposition" in response.headers:
-        fname_match = re.findall(
-            r'filename="?([^"]+)"?', response.headers["Content-Disposition"]
-        )
-        if fname_match:
-            filename = fname_match[0]
+        # Try to get filename from Content-Disposition header
+        if "Content-Disposition" in response.headers:
+            fname_match = re.findall(
+                r'filename="?([^"]+)"?', response.headers["Content-Disposition"]
+            )
+            if fname_match:
+                filename = fname_match[0]
 
-    # Read content
-    content_bytes = response.content
+        # Read content
+        content_bytes = response.content
 
-    text = extract_text(content_bytes, filename)
-    if text.strip():
-        # Use filename (without extension) as submission name, or full filename
-        # For consistency with github (repo name), let's use full filename
-        # or maybe filename as submission name.
-        submissions[filename] = text
+        text = extract_text(content_bytes, filename)
+        if text.strip():
+            submissions[filename] = text
 
     return submissions
 
 
 def extract_from_github(
-    url: str, ignore_patterns: Optional[List[str]] = None
+    url: str, ignore_patterns: Optional[List[str]] = None, ignore: bool = True
 ) -> Dict[str, str]:
     """
     Clone a GitHub repository and extract text from all files.
     
     Args:
         url: GitHub repository URL
-        ignore_patterns: Patterns to skip
+        ignore_patterns: Patterns to match
+        ignore: If True (default), skip files matching patterns. If False, only include files matching patterns.
 
     Returns:
         Dict with repo name as key and combined content as value (one submission per repo)
@@ -345,7 +425,7 @@ def extract_from_github(
     repo_name = url.split("/")[-1].replace(".git", "")
     with tempfile.TemporaryDirectory() as temp_dir:
         git.Repo.clone_from(url, temp_dir)
-        folder_submissions = extract_from_folder(temp_dir, ignore_patterns)
+        folder_submissions = extract_from_folder(temp_dir, ignore_patterns, ignore=ignore)
 
         # Combine all files into one submission per repo
         if folder_submissions:
@@ -364,14 +444,16 @@ def extract_from_folder(
     folder_path: str,
     ignore_patterns: Optional[List[str]] = None,
     max_workers: Optional[int] = None,
+    ignore: bool = True,
 ) -> Dict[str, str]:
     """
     Recursively extract text from all files in a folder.
 
     Args:
         folder_path: Path to folder
-        ignore_patterns: Patterns to skip
+        ignore_patterns: Patterns to match
         max_workers: Max threads for parallel extraction (default: CPU count)
+        ignore: If True (default), skip files matching patterns. If False, only include files matching patterns.
 
     Returns:
         Dict mapping relative filename to extracted text
@@ -388,11 +470,13 @@ def extract_from_folder(
     # Phase 1: Collect all file paths (sequential)
     file_paths = []
     for root, dirs, files in os.walk(folder_path):
-        # Filter out ignored directories
-        dirs[:] = [d for d in dirs if not _should_ignore(d, ignore_patterns)]
+        # Filter out directories only in exclude mode (ignore=True)
+        # In include mode, we need to traverse all dirs to find matching files
+        if ignore:
+            dirs[:] = [d for d in dirs if not _should_ignore(d, ignore_patterns)]
 
         for filename in files:
-            if _should_ignore(filename, ignore_patterns):
+            if _should_ignore(filename, ignore_patterns) == ignore:
                 continue
 
             file_path = os.path.join(root, filename)
